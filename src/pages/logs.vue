@@ -85,6 +85,10 @@ function ttftColor(ms: number | null): string {
   return 'text-(--ui-error)'
 }
 
+function fmtTtft(ms: number | null): string {
+  return ms == null ? '-' : `${(ms / 1000).toFixed(2)} s`
+}
+
 // new-api getThroughputColor：>=30 t/s 绿、>=15 琥珀、<15 红
 function tpsColor(tps: number | null): string {
   if (tps == null) return ''
@@ -202,7 +206,7 @@ function formatBody(raw: string | null): string {
         </span>
       </template>
       <template #ttft_ms-cell="{ row }">
-        <span class="tabular-nums" :class="ttftColor(row.original.ttft_ms)">{{ row.original.ttft_ms ?? '-' }}</span>
+        <span class="tabular-nums" :class="ttftColor(row.original.ttft_ms)">{{ fmtTtft(row.original.ttft_ms) }}</span>
       </template>
       <template #tps-cell="{ row }">
         <span class="tabular-nums" :class="tpsColor(row.original.tps)">
@@ -270,7 +274,7 @@ function formatBody(raw: string | null): string {
           </div>
           <div>
             <div class="text-xs text-(--ui-text-muted)">{{ t('cols.ttft') }}</div>
-            <div class="tabular-nums" :class="ttftColor(detail.ttft_ms)">{{ detail.ttft_ms ?? '-' }}</div>
+            <div class="tabular-nums" :class="ttftColor(detail.ttft_ms)">{{ fmtTtft(detail.ttft_ms) }}</div>
           </div>
           <div>
             <div class="text-xs text-(--ui-text-muted)">{{ t('cols.tps') }}</div>

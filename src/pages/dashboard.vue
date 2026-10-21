@@ -160,7 +160,7 @@ function fmtCompact(n: number): string {
     <StatCard :label="t('dashboard.costUsd')" :value="`$${(totals?.cost ?? 0).toFixed(4)}`" icon="i-lucide-dollar-sign" />
     <StatCard
       :label="t('dashboard.avgTtft')"
-      :value="totals?.avg_ttft_ms != null ? `${totals.avg_ttft_ms.toFixed(0)} ms` : '-'"
+      :value="totals?.avg_ttft_ms != null ? `${(totals.avg_ttft_ms / 1000).toFixed(2)} s` : '-'"
       icon="i-lucide-timer"
     />
     <StatCard
