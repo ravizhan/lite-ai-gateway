@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_IMAGE=node:26-trixie-slim
+            NPM_REGISTRY=https://registry.npmjs.org
+
+  exe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm lint && pnpm build
+      - run: pnpm build:server
+      - run: cp server/db/schema.sql dist-bundle/server/schema.sql
+      - run: cp -r dist dist-bundle/dist
+      - name: Package artifacts
+        run: |
+          cd dist-bundle
+          for f in server/lite-ai-gateway-*; do
+            name=$(basename "$f")
+            mkdir -p "pkg/$name"
+            cp "$f" "pkg/$name/"
+            cp server/schema.sql "pkg/$name/"
+            cp -r dist "pkg/$name/"
+            tar -czf "$name.tar.gz" -C "pkg/$name" .
+            rm -rf "pkg/$name"
+          done
+          ls -la *.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lite-ai-gateway-exe-${{ github.ref_name }}
+          path: dist-bundle/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30

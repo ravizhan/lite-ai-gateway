@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-bundle
+data
+.git
+.gitignore
+.idea
+.explyt
+.wrangler
+.vscode
+*.log
+*.cpuprofile
+.env
+.env.*
+Dockerfile
+docker-compose.yml

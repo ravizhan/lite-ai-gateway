@@ -1,0 +1,53 @@
+{
+	"type": "module",
+	"scripts": {
+		"dev": "concurrently \"vite --port 5173\" \"node --watch server/node.ts\"",
+		"dev:cf": "wrangler dev",
+		"build": "vite build",
+		"build:server": "tsdown",
+		"start": "node server/node.ts",
+		"deploy": "vite build && wrangler deploy",
+		"db:init:local": "wrangler d1 execute lite-ai-gateway --file=server/db/schema.sql --local",
+		"db:init:remote": "wrangler d1 execute lite-ai-gateway --file=server/db/schema.sql --remote",
+		"typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix"
+	},
+	"dependencies": {
+		"@cf-wasm/quickjs": "0.3.0",
+		"@cfworker/json-schema": "^4.1.1",
+		"@modelcontextprotocol/sdk": "^1.32.1",
+		"@nuxt/ui": "^4.11.3",
+		"echarts": "^6.1.0",
+		"gpt-tokenizer": "^4.0.0",
+		"h3": "2.0.1-rc.26",
+		"pinia": "^4.1.0",
+		"tailwindcss": "^4.3.3",
+		"vite": "^8.3.4",
+		"vue": "^3.5.44",
+		"vue-draggable-plus": "^0.6.1",
+		"vue-echarts": "^8.3.2",
+		"vue-i18n": "^11.4.14",
+		"vue-router": "^5.4.0",
+		"zod": "^4.6.7"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20261014.1",
+		"@eslint/js": "^10.0.1",
+		"@iconify-json/lucide": "^1.2.144",
+		"@tsdown/exe": "^0.23.1",
+		"@types/node": "^26.6.5",
+		"@vitejs/plugin-vue": "^6.0.10",
+		"concurrently": "^10.0.6",
+		"eslint": "^10.12.0",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-vue": "^10.11.1",
+		"tsdown": "^0.23.1",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.71.2",
+		"unplugin-auto-import": "^21.1.0",
+		"unplugin-vue-components": "^32.1.0",
+		"vue-tsc": "^3.3.13",
+		"wrangler": "^4.151.0"
+	}
+}

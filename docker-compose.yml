@@ -1,0 +1,20 @@
+services:
+  gateway:
+    build:
+      context: .
+    image: lite-ai-gateway:latest
+    container_name: lite-ai-gateway
+    restart: unless-stopped
+    ports:
+      - '8788:8788'
+    environment:
+      # 从同目录 .env 插值（与 pnpm dev 共用一份 .env）
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN 未设置：请在 .env 或 shell 环境中提供}
+      DATABASE_PATH: /app/data/gateway.db
+      PORT: '8788'
+    volumes:
+      # SQLite 持久化；换成绑定挂载（./data:/app/data）时注意宿主目录属主需为 uid 1000
+      - gateway-data:/app/data
+
+volumes:
+  gateway-data:

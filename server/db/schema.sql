@@ -1,0 +1,182 @@
+-- lite-ai-gateway 数据库结构（Node SQLite 与 Workers D1 共用同一份，幂等可重复执行）
+-- 建表方式：
+--   Node: 启动时检查库是否为空（sqlite_master 无用户表），为空则执行本文件；非空则跳过。
+--   D1:   pnpm db:init:local | db:init:remote（wrangler d1 execute --file=server/db/schema.sql）
+-- 不做增量迁移：schema 变更由本文件手工修改 + 手动对存量库执行 ALTER / 重建。
+
+CREATE TABLE IF NOT EXISTS providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  base_url TEXT NOT NULL,
+  api_key TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'llm' CHECK (type IN ('llm', 'embedding')), -- provider protocol
+  enabled INTEGER NOT NULL DEFAULT 1,
+  supports_responses INTEGER NOT NULL DEFAULT 0, -- 仅 llm 类型生效
+  timeout_ms INTEGER NOT NULL DEFAULT 0, -- 上游超时；0=不限；仅非流式/发现/测试生效
+  max_concurrency INTEGER NOT NULL DEFAULT 0, -- 跨该提供商全部模型的总在途上限；0=无限
+  transform_code TEXT NOT NULL DEFAULT '', -- 仅 embedding 类型生效；空 = 纯透传
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  alias TEXT NOT NULL DEFAULT '', -- 对外模型 id（客户端请求/计费/路由/日志统一使用）；空 = 用原始 model
+  discovered INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(provider_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS prices (
+  model TEXT NOT NULL,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  input_price REAL NOT NULL DEFAULT 0,
+  output_price REAL NOT NULL DEFAULT 0,
+  cache_read_price REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (model, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS model_routes (
+  model TEXT NOT NULL,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  priority INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  max_concurrency INTEGER NOT NULL DEFAULT 0, -- 该 model/provider 组合的在途上限；0=无限
+  PRIMARY KEY (model, provider_id)
+);
+
+-- 供应商在途并发租约（provider/route limit 任一非零时每受限请求一条）。
+-- 不建二级索引：峰值约 10 并发，表内正常只有个位数活跃行；WITHOUT ROWID 避免 TEXT
+-- 主键另建 autoindex（二级索引会让每次 INSERT/DELETE 额外计入 index-row writes）。
+CREATE TABLE IF NOT EXISTS llm_concurrency_leases (
+  lease_id TEXT PRIMARY KEY,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- session → provider 粘性绑定（sticky 请求每请求一次 UPSERT claim）。
+-- 不建 expiry 索引：复合主键覆盖每请求的精确查询且不产生独立 autoindex；过期 row 对
+-- 查询不可见，同一 scope 下次 claim 原位覆盖，请求路径不做全表清理。
+CREATE TABLE IF NOT EXISTS llm_session_affinity (
+  api_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  protocol TEXT NOT NULL,
+  model TEXT NOT NULL,
+  session_hash TEXT NOT NULL,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  binding_token TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (api_key_id, protocol, model, session_hash)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  key TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  api_key_id INTEGER,
+  protocol TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider_id INTEGER,
+  provider_name TEXT,
+  stream INTEGER NOT NULL DEFAULT 0,
+  status INTEGER NOT NULL,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  ttft_ms INTEGER,
+  duration_ms INTEGER NOT NULL,
+  tps REAL,
+  cost REAL NOT NULL DEFAULT 0,
+  error TEXT,
+  client_ip TEXT,
+  req_body TEXT, -- 仅错误请求（最终状态非 200）记录完整请求体；正常请求为 NULL
+  resp_body TEXT -- 仅错误请求记录完整响应体（流式为拼接后的全部 chunk）；正常请求为 NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_logs_ts ON llm_logs(ts);
+CREATE INDEX IF NOT EXISTS idx_llm_logs_model ON llm_logs(model);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  command TEXT,
+  args TEXT,
+  env TEXT,
+  url TEXT,
+  headers TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS mcp_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT ''
+);
+
+-- MCP 能力快照：server 启用时发现并持久化；detail 为能力完整 JSON（tool/prompt 原样，
+-- resource 的 name = uri）。server 禁用后保留快照，重新启用时全量替换。
+-- MCP 能力快照：server 创建时发现并持久化（无论 enabled）；detail 为能力完整 JSON
+-- （tool/prompt 原样，resource 的 name = uri）。禁用后保留快照，重新启用时全量替换。
+CREATE TABLE IF NOT EXISTS mcp_capabilities (
+  server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  PRIMARY KEY (server_id, kind, name)
+);
+
+-- 分组能力白名单：空/缺省 = 该 server 没有任何能力被暴露（不是整 server 放行）。
+-- 不引用 mcp_capabilities 外键：重新发现时快照先删后插，级联会误删选择。
+CREATE TABLE IF NOT EXISTS mcp_group_capabilities (
+  group_id INTEGER NOT NULL REFERENCES mcp_groups(id) ON DELETE CASCADE,
+  server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (group_id, server_id, kind, name)
+);
+
+-- 能力 prompt 覆盖：管理端编辑的描述文本，hub 聚合 tools/prompts/resources/list 时替换
+-- 快照中的默认 description。不引用 mcp_capabilities 外键：重新发现时快照先删后插，
+-- 级联会误删覆盖；失效覆盖（能力已消失）保留但永不匹配，无副作用。
+CREATE TABLE IF NOT EXISTS mcp_prompt_overrides (
+  server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (server_id, kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  direction TEXT NOT NULL, -- 'call' = 客户端协议请求/通知；'upstream' = hub 聚合时的内部上游调用
+  group_name TEXT,
+  server_name TEXT,
+  method TEXT NOT NULL,
+  tool_name TEXT,
+  duration_ms INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  error TEXT,
+  request_body TEXT, -- 入站 JSON-RPC 消息原文（请求/通知；协议层前被拒的请求为原始 HTTP 请求体）；内部上游行为合成请求
+  response_body TEXT -- 仅失败：发给客户端的完整 JSON-RPC 失败响应原文；成功为 NULL（绝不落输出）
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_logs_ts ON mcp_logs(ts);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+-- MCP 能力快照：server 创建时发现并持久化（无论 enabled）；detail 为能力完整 JSON
+-- （tool/prompt 原样，resource 的 name = uri）。禁用后保留快照，重新启用时全量替换。

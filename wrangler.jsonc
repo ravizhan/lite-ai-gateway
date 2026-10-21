@@ -1,0 +1,32 @@
+{
+  "name": "lite-ai-gateway",
+  "main": "server/cloudflare.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["new_module_registry"],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  },
+  "placement": { "mode": "smart" },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/api/*", "/mcp", "/mcp/*", "/sse", "/sse/*", "/messages"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lite-ai-gateway"
+    }
+  ],
+  "secrets": {
+    "required": ["ADMIN_TOKEN"]
+  }
+}
