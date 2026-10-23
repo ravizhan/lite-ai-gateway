@@ -59,7 +59,7 @@ def read_streamed_content(response):
 
 
 def main():
-    repo = "ravizhan/MWU"
+    repo = "ravizhan/lite-ai-gateway"
     current_version = os.getenv("GITHUB_REF_NAME")
     api_key = os.getenv("API_KEY")
 
