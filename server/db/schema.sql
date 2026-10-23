@@ -3,6 +3,10 @@
 --   Node: 启动时检查库是否为空（sqlite_master 无用户表），为空则执行本文件；非空则跳过。
 --   D1:   pnpm db:init:local | db:init:remote（wrangler d1 execute --file=server/db/schema.sql）
 -- 不做增量迁移：schema 变更由本文件手工修改 + 手动对存量库执行 ALTER / 重建。
+-- 存量库升级顺序（必须先 ALTER 再执行本文件）：SQLite 在 CREATE TRIGGER 时不解析触发器体内
+-- 的列名，缺 cost_pending 时触发器仍会创建成功，直到首次写 prices 才报 "no such column"。
+--   ALTER TABLE llm_logs ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 0;
+-- 之后执行本文件创建回填触发器。存量行默认 cost_pending = 0，视为已冻结、永不重算。
 
 CREATE TABLE IF NOT EXISTS providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +100,11 @@ CREATE TABLE IF NOT EXISTS llm_logs (
   duration_ms INTEGER NOT NULL,
   tps REAL,
   cost REAL NOT NULL DEFAULT 0,
+  -- 计费在落库时冻结：cost 只由本次 INSERT（或首次配置价格的回填）写入，之后改价、
+  -- 删除/重建模型、删除后重新添加价格都不再改动它（0 也可能是有效定价）。
+  -- cost_pending: 0 = 已定价（cost 为最终值）；1 = 落库时 prices 无该 (model, provider_id)
+  -- 行，cost 暂为 0，等该组合首次插入价格行时回填。embedding 不计费，恒为 0。
+  cost_pending INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   client_ip TEXT,
   req_body TEXT, -- 仅错误请求（最终状态非 200）记录完整请求体；正常请求为 NULL
@@ -104,6 +113,29 @@ CREATE TABLE IF NOT EXISTS llm_logs (
 
 CREATE INDEX IF NOT EXISTS idx_llm_logs_ts ON llm_logs(ts);
 CREATE INDEX IF NOT EXISTS idx_llm_logs_model ON llm_logs(model);
+
+-- 首次配置价格（prices INSERT，含 upsert 的插入分支）时，回填此前因无价格而挂起的日志。
+-- 只处理 cost_pending = 1 的 chat/responses 行：已冻结的历史行（含 0 价、embedding）不动；
+-- 改价是 prices UPDATE，不触发本触发器 → 历史日志成本不变。
+-- 竞态：日志 INSERT 用单条 INSERT..SELECT LEFT JOIN prices 在同一语句内决定 cost 与
+-- cost_pending；SQLite 单写者串行化，保证「先落库后配价」与「先配价后落库」都只计一次。
+DROP TRIGGER IF EXISTS trg_prices_insert_backfill_logs;
+CREATE TRIGGER trg_prices_insert_backfill_logs
+AFTER INSERT ON prices
+FOR EACH ROW
+BEGIN
+  UPDATE llm_logs
+     SET cost = (
+           (prompt_tokens - cached_tokens) * NEW.input_price
+           + cached_tokens * NEW.cache_read_price
+           + completion_tokens * NEW.output_price
+         ) / 1000000.0,
+         cost_pending = 0
+   WHERE cost_pending = 1
+     AND protocol IN ('chat', 'responses')
+     AND model = NEW.model
+     AND provider_id = NEW.provider_id;
+END;
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

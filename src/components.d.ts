@@ -15,6 +15,7 @@ declare module 'vue' {
     AffinitySourceEditor: typeof import('./components/AffinitySourceEditor.vue')['default']
     ConfirmModal: typeof import('./components/ConfirmModal.vue')['default']
     CopyButton: typeof import('./components/CopyButton.vue')['default']
+    DiscoverModelsModal: typeof import('./components/DiscoverModelsModal.vue')['default']
     McpPromptEditModal: typeof import('./components/McpPromptEditModal.vue')['default']
     McpServerFormModal: typeof import('./components/McpServerFormModal.vue')['default']
     ModelSeriesChart: typeof import('./components/ModelSeriesChart.vue')['default']

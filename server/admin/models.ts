@@ -3,6 +3,7 @@ import { HTTPError, getQuery, getRouterParam, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
+import type { Db } from '../db/types.ts'
 import type { ModelRow } from '../../shared/api.ts'
 
 /** 手动补录模型（discovered=0，用于 Gemini/Azure 等无兼容 /models 的供应商） */
@@ -32,6 +33,26 @@ function routeId(event: H3Event): number {
   const id = Number(getRouterParam(event, 'id'))
   if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
   return id
+}
+
+/**
+ * 删除模型行，并级联清理该供应商下同一对外 id 的 prices / model_routes 行。
+ * 同供应商仍有其他模型行映射到同一对外 id 时保留（配置仍被使用）。
+ */
+export async function deleteModelRow(db: Db, row: ModelRow): Promise<void> {
+  const external = row.alias !== '' ? row.alias : row.model
+  await db.run(`DELETE FROM models WHERE id = ?`, row.id)
+  const stillUsed = await db.get<{ id: number }>(
+    `SELECT id FROM models
+     WHERE provider_id = ? AND (alias = ? OR (alias = '' AND model = ?)) LIMIT 1`,
+    row.provider_id,
+    external,
+    external,
+  )
+  if (!stillUsed) {
+    await db.run(`DELETE FROM prices WHERE provider_id = ? AND model = ?`, row.provider_id, external)
+    await db.run(`DELETE FROM model_routes WHERE provider_id = ? AND model = ?`, row.provider_id, external)
+  }
 }
 
 export function registerModels(app: H3): void {
@@ -108,27 +129,14 @@ export function registerModels(app: H3): void {
     return row
   })
 
-  // 删除模型：级联清理该供应商下同一对外 id 的 prices / model_routes 行。
-  // 同供应商仍有其他模型行映射到同一对外 id 时保留（配置仍被使用）。
+  // 删除模型（级联规则见 deleteModelRow）
   app.delete('/api/admin/models/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
     const db = getDb(event)
     const row = await db.get<ModelRow>(`SELECT * FROM models WHERE id = ?`, id)
     if (!row) throw new HTTPError({ status: 404, message: 'model not found' })
-    const external = row.alias !== '' ? row.alias : row.model
-    await db.run(`DELETE FROM models WHERE id = ?`, id)
-    const stillUsed = await db.get<{ id: number }>(
-      `SELECT id FROM models
-       WHERE provider_id = ? AND (alias = ? OR (alias = '' AND model = ?)) LIMIT 1`,
-      row.provider_id,
-      external,
-      external,
-    )
-    if (!stillUsed) {
-      await db.run(`DELETE FROM prices WHERE provider_id = ? AND model = ?`, row.provider_id, external)
-      await db.run(`DELETE FROM model_routes WHERE provider_id = ? AND model = ?`, row.provider_id, external)
-    }
+    await deleteModelRow(db, row)
     return { ok: true }
   })
 }

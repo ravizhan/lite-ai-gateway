@@ -30,7 +30,7 @@ export function registerPrices(app: H3): void {
     return getDb(event).all<PriceRow>(`SELECT * FROM prices ORDER BY model, provider_id`)
   })
 
-  // 按 model/provider upsert 价格
+  // 新建价格由 schema 的 AFTER INSERT 触发器补算未定价日志；冲突更新只影响之后的日志。
   app.put('/api/admin/prices', async (event) => {
     requireAdmin(event)
     const body = parseBody(priceSchema, await readBody(event))

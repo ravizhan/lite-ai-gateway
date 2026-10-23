@@ -70,18 +70,18 @@ const showDelete = computed({
     if (!v) deleting.value = null
   },
 })
-/** 删除会级联清掉价格行，递增 key 强制 PricingPanel 重拉价格 */
-const pricingKey = ref(0)
-
 async function confirmDelete() {
   if (!deleting.value) return
+  const target = deleting.value
   deleteLoading.value = true
   try {
-    await api(`/api/admin/models/${deleting.value.id}`, { method: 'DELETE' })
+    await api(`/api/admin/models/${target.id}`, { method: 'DELETE' })
     toast.add({ title: t('models.deleted'), color: 'success' })
     deleting.value = null
-    await loadAll()
-    pricingKey.value += 1
+    // 原地移除条目，不走 loadAll（loading 骨架会卸载折叠面板导致全部收起）
+    models.value = models.value.filter((m) => m.id !== target.id)
+    // 级联可能删掉路由行，静默刷新路由；价格面板 v-if 懒挂载，切过去时自行重拉
+    routes.value = await api<RouteWithProvider[]>('/api/admin/routes')
     // 选中的路由模型可能随级联删除消失
     if (routeModel.value && !routeOptions.value.some((o) => o.value === routeModel.value)) {
       routeModel.value = ''
@@ -380,7 +380,7 @@ const tabs = computed(() => [
     </template>
 
     <template #prices>
-      <PricingPanel :key="pricingKey" :providers="providers" :models="models" :routes="routes" :loading="loading" />
+      <PricingPanel :providers="providers" :models="models" :routes="routes" :loading="loading" />
     </template>
 
     <template #routes>

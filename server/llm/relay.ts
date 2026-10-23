@@ -1,6 +1,6 @@
 import { getRequestIP, onDispose, type H3Event } from 'h3'
 import { getDb } from '../db/index.ts'
-import { gatewayError, type PriceRow } from '../../shared/api.ts'
+import { gatewayError } from '../../shared/api.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { upstreamTimeout } from '../lib/timeout.ts'
 import { tryAcquireConcurrency, type ConcurrencyPermit } from './concurrency.ts'
@@ -20,7 +20,6 @@ import {
 import { loadGatewaySettings } from '../settings.ts'
 import {
   calcTps,
-  computeCost,
   normalizeChatUsage,
   normalizeResponsesUsage,
   type NormalizedUsage,
@@ -32,7 +31,7 @@ interface RelayOpts {
   path: '/chat/completions' | '/responses'
 }
 
-/** llm_logs 落库行（usage/ttft/tps/cost/error 缺省由 insertLog 兜底为 0/null） */
+/** llm_logs 落库行（usage/ttft/tps/error 缺省由 insertLog 兜底为 0/null；cost 不在行内传递） */
 interface LogEntry {
   apiKeyId: number | null
   protocol: 'chat' | 'responses'
@@ -45,7 +44,6 @@ interface LogEntry {
   usage?: NormalizedUsage
   ttftMs?: number | null
   tps?: number | null
-  cost?: number
   error?: string | null
   clientIp: string | null
   /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL */
@@ -53,30 +51,51 @@ interface LogEntry {
   respBody?: string | null
 }
 
-/** 写一条 llm_logs（单条 INSERT，D1 子请求预算内） */
+/**
+ * 写一条 llm_logs（单条 INSERT，D1 子请求预算内）。
+ *
+ * cost 与 cost_pending 在同一条 INSERT 内按当前 prices 原子计算（LEFT JOIN 精确匹配
+ * model + provider_id）：命中价格 → 存 cost、cost_pending=0（显式 0 价同样算命中）；
+ * 未命中 → cost 保持默认 0、cost_pending=1。请求路径因此不读价格，改价也不会重算历史日志；
+ * 之后新增价格由 schema 中 prices AFTER INSERT 触发器只回填 cost_pending=1 的历史行。
+ */
 async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
   const usage = row.usage ?? { prompt: 0, completion: 0, cached: 0, total: 0 }
   await getDb(event).run(
-    `INSERT INTO llm_logs (
+    `WITH u AS (
+       SELECT ? AS prompt, ? AS completion, ? AS cached, ? AS total,
+              ? AS model, ? AS provider_id
+     )
+     INSERT INTO llm_logs (
        api_key_id, protocol, model, provider_id, provider_name, stream, status,
        prompt_tokens, completion_tokens, cached_tokens, total_tokens,
-       ttft_ms, duration_ms, tps, cost, error, client_ip, req_body, resp_body
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    row.apiKeyId,
-    row.protocol,
-    row.model,
-    row.providerId,
-    row.providerName,
-    row.stream,
-    row.status,
+       ttft_ms, duration_ms, tps, cost, cost_pending, error, client_ip, req_body, resp_body
+     )
+     SELECT ?, ?, u.model, u.provider_id, ?, ?, ?,
+            u.prompt, u.completion, u.cached, u.total,
+            ?, ?, ?,
+            CASE WHEN p.model IS NULL THEN 0
+                 ELSE ((u.prompt - u.cached) * p.input_price
+                       + u.cached * p.cache_read_price
+                       + u.completion * p.output_price) / 1000000.0 END,
+            CASE WHEN p.model IS NULL THEN 1 ELSE 0 END,
+            ?, ?, ?, ?
+     FROM u
+     LEFT JOIN prices p ON p.model = u.model AND p.provider_id = u.provider_id`,
     usage.prompt,
     usage.completion,
     usage.cached,
     usage.total,
+    row.model,
+    row.providerId,
+    row.apiKeyId,
+    row.protocol,
+    row.providerName,
+    row.stream,
+    row.status,
     row.ttftMs ?? null,
     row.durationMs,
     row.tps ?? null,
-    row.cost ?? 0,
     row.error ?? null,
     row.clientIp,
     row.reqBody ?? null,
@@ -625,12 +644,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
         opts.protocol === 'chat'
           ? normalizeChatUsage(usageRaw)
           : normalizeResponsesUsage(usageRaw)
-      const price = await db.get<PriceRow>(
-        'SELECT * FROM prices WHERE model = ? AND provider_id = ?',
-        model,
-        provider.id,
-      )
-      const cost = computeCost(usage, price)
       const tps = calcTps(usage.completion, durationMs, null, false)
       const headers = new Headers(res.headers)
       headers.delete('content-length')
@@ -644,7 +657,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
           ttftMs,
           durationMs,
           tps,
-          cost,
         }),
       )
       return new Response(buf, {
@@ -696,12 +708,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
           opts.protocol === 'chat'
             ? normalizeChatUsage(usageRaw)
             : normalizeResponsesUsage(usageRaw)
-        const price = await db.get<PriceRow>(
-          'SELECT * FROM prices WHERE model = ? AND provider_id = ?',
-          model,
-          provider.id,
-        )
-        const cost = computeCost(usage, price)
         // tps 分母同样以上游起点计，保持「流结束 − 首 chunk」生成窗口语义不变
         const tps = calcTps(usage.completion, Math.round(endAt - upstreamStart), ttftMs, true)
         const finalError = permit.lost() ? 'concurrency lease lost' : error
@@ -714,7 +720,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
           ttftMs,
           durationMs,
           tps,
-          cost,
           error: finalError !== null ? sanitizeError(finalError) : null,
         })
       })(),

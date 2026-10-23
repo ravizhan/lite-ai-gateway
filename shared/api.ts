@@ -70,6 +70,8 @@ export interface LlmLogRow {
   duration_ms: number
   tps: number | null
   cost: number
+  /** 1 = 尚未定价，首次配置价格后补算；0 = 已计价或不计费。 */
+  cost_pending: number
   error: string | null
   client_ip: string | null
   req_body: string | null
@@ -249,8 +251,13 @@ export interface StatsResult {
 }
 
 export interface DiscoverResult {
+  /** 上游 /models 返回的模型 id（去重，未写库） */
+  models: string[]
+}
+
+export interface ProviderModelsSyncResult {
   added: number
-  total: number
+  removed: number
 }
 
 export interface McpTestResult {

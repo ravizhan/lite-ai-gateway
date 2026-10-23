@@ -86,11 +86,23 @@
     "delete": "删除",
     "enabledToast": "提供商已启用",
     "disabledToast": "提供商已禁用",
-    "discovered": "发现 {total} 个模型（新增 {added} 个）",
     "discoveryFailed": "发现失败",
     "deleted": "提供商已删除",
     "deleteTitle": "删除提供商",
     "deleteDetail": "其模型与路由配置也会一并删除"
+  },
+  "discoverModels": {
+    "title": "选择模型 · {name}",
+    "description": "勾选要加入模型目录的模型；取消勾选已添加的模型会将其移除。",
+    "empty": "上游未返回任何模型",
+    "searchPlaceholder": "筛选模型",
+    "selectAll": "全选（当前筛选）",
+    "selectedCount": "已选 {selected} / {total}",
+    "noMatch": "没有匹配的模型",
+    "added": "已添加",
+    "pending": "将新增 {add} 个，移除 {remove} 个",
+    "saved": "已新增 {added} 个模型，移除 {removed} 个",
+    "saveFailed": "保存失败"
   },
   "providerForm": {
     "editTitle": "编辑提供商",
@@ -148,7 +160,7 @@
   },
   "pricing": {
     "title": "Token 定价",
-    "subtitle": "每 100 万 Token 的美元价格",
+    "subtitle": "每 100 万 Token 的美元价格。首次定价会补算未定价日志，后续改价只影响新写入的日志。",
     "empty": "暂无可配置价格。",
     "emptyDesc": "请先添加模型或路由，以比较各提供商价格。",
     "filterEmpty": "没有符合当前筛选条件的价格。",
@@ -204,7 +216,8 @@
     "stream": "流式",
     "sync": "同步",
     "tokensTooltip": "输入 {prompt} · 输出 {completion} · 缓存 {cached}",
-    "billingRecorded": "记录成本：${cost}。按请求完成时的供应商价格计算，后续改价不影响此金额。",
+    "billingRecorded": "记录成本：${cost}。未定价时先记为 0，首次定价后补算；定价后按日志写入时的供应商价格计算，后续改价不重算历史成本。",
+    "billingEmbedding": "记录成本：${cost}。Embedding 只记录 Token 用量，不计费。",
     "error": "错误",
     "billing": "计费",
     "clientIp": "客户端 IP",

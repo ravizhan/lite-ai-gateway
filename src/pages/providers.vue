@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../lib/api'
-import type { DiscoverResult, ProviderRow } from '../../shared/api'
+import type { DiscoverResult, ModelRow, ProviderRow } from '../../shared/api'
 import { useI18n } from 'vue-i18n'
 
 type ProviderType = ProviderRow['type']
@@ -62,17 +62,33 @@ async function toggleEnabled(row: ProviderWithCount) {
   }
 }
 
+const discoverTarget = ref<ProviderWithCount | null>(null)
+const discoveredModels = ref<string[]>([])
+const existingModels = ref<string[]>([])
+const showDiscover = ref(false)
+
+/** 拉取上游模型列表后弹窗由用户选择；发现失败只提示错误，不弹窗 */
 async function discover(row: ProviderWithCount) {
   discovering.value = row.id
   try {
-    const r = await api<DiscoverResult>(`/api/admin/providers/${row.id}/discover`, { method: 'POST' })
-    toast.add({ title: t('providers.discovered', { total: r.total, added: r.added }), color: 'success' })
-    await load()
+    const [r, existing] = await Promise.all([
+      api<DiscoverResult>(`/api/admin/providers/${row.id}/discover`, { method: 'POST' }),
+      api<ModelRow[]>('/api/admin/models', { query: { providerId: row.id } }),
+    ])
+    discoverTarget.value = row
+    discoveredModels.value = r.models
+    existingModels.value = existing.map((m) => m.model)
+    showDiscover.value = true
   } catch (e) {
     toast.add({ title: e instanceof Error ? e.message : t('providers.discoveryFailed'), color: 'error' })
   } finally {
     discovering.value = null
   }
+}
+
+async function onDiscoverSaved() {
+  showDiscover.value = false
+  await load()
 }
 
 async function confirmDelete() {
@@ -175,6 +191,15 @@ const columns = computed(() => [
   </UCard>
 
   <ProviderFormModal v-model:open="showForm" :provider="editing" @saved="onSaved" />
+
+  <DiscoverModelsModal
+    v-model:open="showDiscover"
+    :provider-id="discoverTarget?.id ?? null"
+    :provider-name="discoverTarget?.name ?? ''"
+    :models="discoveredModels"
+    :existing="existingModels"
+    @saved="onDiscoverSaved"
+  />
 
   <ConfirmModal
     v-model:open="showDelete"

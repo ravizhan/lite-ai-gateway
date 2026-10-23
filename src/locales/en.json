@@ -86,11 +86,23 @@
     "delete": "Delete",
     "enabledToast": "Provider enabled",
     "disabledToast": "Provider disabled",
-    "discovered": "Discovered {total} models ({added} new)",
     "discoveryFailed": "Discovery failed",
     "deleted": "Provider deleted",
     "deleteTitle": "Delete provider",
     "deleteDetail": "Its models and route configuration will also be removed"
+  },
+  "discoverModels": {
+    "title": "Select models · {name}",
+    "description": "Check the models to add to the catalog; unchecking an added model removes it.",
+    "empty": "The upstream returned no models",
+    "searchPlaceholder": "Filter models",
+    "selectAll": "Select all (filtered)",
+    "selectedCount": "{selected} / {total} selected",
+    "noMatch": "No matching models",
+    "added": "Added",
+    "pending": "{add} to add, {remove} to remove",
+    "saved": "Added {added} models, removed {removed}",
+    "saveFailed": "Save failed"
   },
   "providerForm": {
     "editTitle": "Edit provider",
@@ -148,7 +160,7 @@
   },
   "pricing": {
     "title": "Token pricing",
-    "subtitle": "USD per 1M tokens",
+    "subtitle": "USD per 1M tokens. Initial pricing fills in unpriced log costs; later changes apply only to newly written logs.",
     "empty": "No pricing candidates yet.",
     "emptyDesc": "Add a model or route to compare provider prices.",
     "filterEmpty": "No prices match the current filters.",
@@ -204,7 +216,8 @@
     "stream": "Stream",
     "sync": "Sync",
     "tokensTooltip": "Input {prompt} · Output {completion} · Cache {cached}",
-    "billingRecorded": "Recorded cost: ${cost}. Calculated using provider prices at request completion; later price changes do not alter this amount.",
+    "billingRecorded": "Recorded cost: ${cost}. Unpriced requests start at 0 and are backfilled when pricing is first configured. Otherwise, provider prices at log creation apply; later edits do not recalculate historical costs.",
+    "billingEmbedding": "Recorded cost: ${cost}. Embeddings record token usage without billing.",
     "error": "Error",
     "billing": "Billing",
     "clientIp": "Client IP",

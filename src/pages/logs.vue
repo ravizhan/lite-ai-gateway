@@ -98,7 +98,9 @@ function tpsColor(tps: number | null): string {
 }
 
 function billing(row: LlmLogRow): string {
-  return t('logs.billingRecorded', { cost: row.cost.toFixed(6) })
+  return t(row.protocol === 'embedding' ? 'logs.billingEmbedding' : 'logs.billingRecorded', {
+    cost: row.cost.toFixed(6),
+  })
 }
 
 const columns = computed(() => [

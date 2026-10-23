@@ -1,5 +1,3 @@
-import type { PriceRow } from '../../shared/api.ts'
-
 /** 归一化后的 token 用量（缺省 0） */
 export interface NormalizedUsage {
   prompt: number
@@ -54,20 +52,6 @@ export function normalizeEmbeddingUsage(raw: unknown): NormalizedUsage {
   const billedUnits = meta?.billed_units as Record<string, unknown> | undefined
   const total = num(r.total_tokens) ?? num(r.prompt_tokens) ?? num(billedUnits?.input_tokens) ?? 0
   return { prompt: total, completion: 0, cached: 0, total }
-}
-
-/**
- * 计费（美元）：(prompt − cached) × input_price + cached × cache_read_price + completion × output_price，均按 1M tokens 计价。
- * 无价格行 → 0。
- */
-export function computeCost(u: NormalizedUsage, price: PriceRow | undefined): number {
-  if (!price) return 0
-  return (
-    ((u.prompt - u.cached) * price.input_price +
-      u.cached * price.cache_read_price +
-      u.completion * price.output_price) /
-    1e6
-  )
 }
 
 /**

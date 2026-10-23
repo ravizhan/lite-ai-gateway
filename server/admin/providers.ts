@@ -6,7 +6,8 @@ import { getDb } from '../db/index.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { discoveryTimeout } from '../lib/timeout.ts'
 import { checkTransform } from '../lib/transform.ts'
-import type { DiscoverResult, ProviderRow } from '../../shared/api.ts'
+import type { DiscoverResult, ModelRow, ProviderModelsSyncResult, ProviderRow } from '../../shared/api.ts'
+import { deleteModelRow } from './models.ts'
 
 /** 供应商字段 schema（POST 全必填；PUT 用 partial 全可选） */
 const providerSchema = z.object({
@@ -25,6 +26,12 @@ const providerPatchSchema = providerSchema.partial()
 /** GET {base}/models 响应（仅取模型 id 列表） */
 const discoverPayloadSchema = z.object({
   data: z.array(z.object({ id: z.union([z.string(), z.number()]) })),
+})
+
+/** 发现弹窗确认后的增删：add 写入（discovered=1），remove 删除已存在的行 */
+const modelsSyncSchema = z.object({
+  add: z.array(z.string().min(1)),
+  remove: z.array(z.string().min(1)),
 })
 
 /** base_url 归一化：去掉尾部斜杠 */
@@ -162,7 +169,7 @@ export function registerProviders(app: H3): void {
     return { ok: true }
   })
 
-  // 模型发现：GET {base}/models → upsert models（discovered=1），错误文本过 sanitizeError
+  // 模型发现：GET {base}/models → 仅返回上游模型 id 列表，不写库；错误文本过 sanitizeError
   app.post('/api/admin/providers/:id/discover', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
@@ -189,8 +196,20 @@ export function registerProviders(app: H3): void {
       // 网络错误 / 超时等 → 502，错误文本过 sanitizeError
       throw new HTTPError({ status: 502, message: sanitizeError(String(err)) })
     }
+    const result: DiscoverResult = { models: [...new Set(list)] }
+    return result
+  })
+
+  // 按用户在发现弹窗中的选择增删该供应商的模型
+  app.post('/api/admin/providers/:id/models', async (event) => {
+    requireAdmin(event)
+    const id = routeId(event)
+    const body = parseBody(modelsSyncSchema, await readBody(event))
+    const db = getDb(event)
+    const provider = await db.get<{ id: number }>(`SELECT id FROM providers WHERE id = ?`, id)
+    if (!provider) throw new HTTPError({ status: 404, message: 'provider not found' })
     let added = 0
-    for (const model of list) {
+    for (const model of new Set(body.add)) {
       const r = await db.run(
         `INSERT OR IGNORE INTO models (provider_id, model, discovered, enabled) VALUES (?, ?, 1, 1)`,
         id,
@@ -198,8 +217,14 @@ export function registerProviders(app: H3): void {
       )
       added += r.changes
     }
-    const row = await db.get<{ total: number }>(`SELECT count(*) AS total FROM models WHERE provider_id = ?`, id)
-    const result: DiscoverResult = { added, total: row?.total ?? 0 }
+    let removed = 0
+    for (const model of new Set(body.remove)) {
+      const row = await db.get<ModelRow>(`SELECT * FROM models WHERE provider_id = ? AND model = ?`, id, model)
+      if (!row) continue
+      await deleteModelRow(db, row)
+      removed += 1
+    }
+    const result: ProviderModelsSyncResult = { added, removed }
     return result
   })
 }
