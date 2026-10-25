@@ -19,8 +19,12 @@ export interface ExposedNameEntry {
 }
 
 /** 暴露名分配：返回与 entries 同序的名字数组（每个名字在范围内唯一） */
-export function assignExposedToolNames(entries: readonly ExposedNameEntry[]): string[] {
+export function assignExposedToolNames(
+  entries: readonly ExposedNameEntry[],
+  reservedNames: readonly string[] = [],
+): string[] {
   const names = entries.map((e) => e.rawName)
+  const reserved = new Set(reservedNames)
   // 分配次序固定为 serverName → 原名 → 输入序；直接比较码元（不用 localeCompare，
   // 避免 Node 与浏览器排序差异）。仅作同类冲突（如两个合成名相撞）时的稳定次序。
   const order = entries
@@ -35,13 +39,18 @@ export function assignExposedToolNames(entries: readonly ExposedNameEntry[]): st
     names[i] === `${entries[i].serverName}__${entries[i].rawName}` ? 0 : names[i] === entries[i].rawName ? 1 : 2
 
   for (let round = 0; round <= entries.length; round++) {
+    let renamed = false
+    for (const i of order) {
+      if (!reserved.has(names[i])) continue
+      names[i] = `${entries[i].serverName}__${names[i]}`
+      renamed = true
+    }
     const groups = new Map<string, number[]>()
     for (const i of order) {
       const group = groups.get(names[i])
       if (group) group.push(i)
       else groups.set(names[i], [i])
     }
-    let renamed = false
     for (const group of groups.values()) {
       if (group.length < 2) continue
       // 唯一的最低优先级成员 = 该名字的合法持有者（合成名优先），其余成员改名；
@@ -65,7 +74,7 @@ export function assignExposedToolNames(entries: readonly ExposedNameEntry[]): st
   }
 
   // 兜底（正常输入 1–2 轮即收敛，这里实际不可达）：按同一优先级追加序号保证全局唯一
-  const used = new Set<string>()
+  const used = new Set(reservedNames)
   for (const i of [...order].sort((a, b) => rank(a) - rank(b) || a - b)) {
     let name = names[i]
     for (let n = 0; used.has(name); n++) name = `${names[i]}__${n}`

@@ -17,6 +17,7 @@ declare module 'vue' {
     CopyButton: typeof import('./components/CopyButton.vue')['default']
     DiscoverModelsModal: typeof import('./components/DiscoverModelsModal.vue')['default']
     McpPromptEditModal: typeof import('./components/McpPromptEditModal.vue')['default']
+    McpSearchUpstreamFormModal: typeof import('./components/McpSearchUpstreamFormModal.vue')['default']
     McpServerFormModal: typeof import('./components/McpServerFormModal.vue')['default']
     ModelSeriesChart: typeof import('./components/ModelSeriesChart.vue')['default']
     PageHeader: typeof import('./components/PageHeader.vue')['default']

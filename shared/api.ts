@@ -124,6 +124,13 @@ export interface McpGroupCapabilitySelection {
   name: string
 }
 
+/** 分组 + 能力白名单 + 本地 web_search 开关（GET/POST/PUT /api/admin/mcp/groups 行） */
+export interface McpGroupWithCapabilities extends McpGroupRow {
+  capabilities: McpGroupCapabilitySelection[]
+  /** mcp_group_web_search 有行 = 1（暴露内置 web_search）；0 = 不暴露 */
+  web_search: 0 | 1
+}
+
 export interface McpLogRow {
   id: number
   ts: string

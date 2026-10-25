@@ -56,6 +56,7 @@ const items = computed<NavigationMenuItem[][]>(() => [
       defaultOpen: mcpActive.value,
       children: [
         { label: t('nav.mcpServers'), to: '/mcps/servers' },
+        { label: t('nav.mcpSearch'), to: '/mcps/search' },
         { label: t('nav.mcpTools'), to: '/mcps/tools' },
         { label: t('nav.mcpGroups'), to: '/mcps/groups' },
         { label: t('nav.mcpLogs'), to: '/mcps/logs' },

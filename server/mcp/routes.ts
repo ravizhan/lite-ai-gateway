@@ -61,7 +61,10 @@ export async function loadGroupSelection(db: Db, groupName: string | null): Prom
 
 async function handleStreamableHttp(event: H3Event): Promise<Response> {
   const db = getDb(event)
-  const group = getRouterParam(event, 'group') ?? null
+  // 路由参数仍是线编码（h3 只对 %25 做防护）；组名含空格/CJK/字面 % 需还原一次。
+  // 解码结果只进 SQL 参数、日志字段与再编码的 SSE endpoint，不参与路径路由/文件访问。
+  const rawGroup = getRouterParam(event, 'group')
+  const group = rawGroup === undefined ? null : decodeURIComponent(rawGroup)
   const isNode = event.runtime?.name === 'node'
   const servers = await loadServers(db, group)
   const selection = await loadGroupSelection(db, group)
@@ -131,36 +134,18 @@ async function handleStreamableHttp(event: H3Event): Promise<Response> {
     void server.close()
     return response
   }
-  // 客户端断开时 readable 侧被 cancel（写侧随之 errored）；但上游可能长时间不产出，
-  // 泵此时阻塞在 reader.read() 上永远看不到 —— 必须在 cancel 钩子里主动收尾：
-  // 取消源流让阻塞的 read 立即结束，并关闭 server/transport（触发未完成请求的补记）。
-  let cancelSource: (() => void) | null = null
-  const passthrough = new TransformStream<Uint8Array, Uint8Array>({
-    cancel() {
-      cancelSource?.()
-      void server.close().catch(() => {})
-    },
-  })
-  const reader = body.getReader()
-  const writer = passthrough.writable.getWriter()
-  cancelSource = () => {
-    void reader.cancel().catch(() => {})
+  // pipeTo 同时观察读端和写端的取消；即使上游不产出，也能解除挂起的读取。
+  // 将收尾挂到生命周期，使运行时已通知的断开能完成协议关闭和上游取消。
+  const passthrough = new TransformStream<Uint8Array, Uint8Array>()
+  const close = (): Promise<void> => {
+    event.req.signal.removeEventListener('abort', onAbort)
+    return server.close()
   }
-  void (async () => {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        await writer.write(value)
-      }
-      await writer.close()
-    } catch (error) {
-      // 客户端断开 → 透传流被取消，write 抛错；终止写侧并取消源流（触发 SDK 清理）
-      await writer.abort(error).catch(() => {})
-    } finally {
-      await reader.cancel().catch(() => {})
-      void server.close().catch(() => {})
-    }
-  })()
+  const onAbort = (): void => { event.waitUntil(close()) }
+  event.req.signal.addEventListener('abort', onAbort, { once: true })
+  if (event.req.signal.aborted) onAbort()
+  const completed = body.pipeTo(passthrough.writable).finally(close)
+  // 流错误已传播到响应体；后台收尾只等待它结束，不再产生未处理的拒绝。
+  event.waitUntil(completed.catch(() => {}))
   return new Response(passthrough.readable, { status: response.status, headers: response.headers })
 }

@@ -47,7 +47,9 @@ const transports = new Map<string, NodeSseEntry>()
 export function registerNodeSse(app: H3): void {
   const handleSse = async (event: H3Event): Promise<Response> => {
     const db = getDb(event)
-    const group = getRouterParam(event, 'group') ?? null
+    // 线编码只还原一次；仅用于 SQL 参数、日志字段与 encodeURIComponent 后的 endpoint
+    const rawGroup = getRouterParam(event, 'group')
+    const group = rawGroup === undefined ? null : decodeURIComponent(rawGroup)
     const node = event.runtime?.node
     if (event.runtime?.name !== 'node' || !node?.res) {
       throw new HTTPError({ status: 500, message: 'sse endpoint requires node runtime' })

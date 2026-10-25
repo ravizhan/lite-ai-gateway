@@ -15,10 +15,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import type { McpServerRow } from '../../shared/api.ts'
 import { assignExposedToolNames, type ExposedNameEntry } from '../../shared/mcp-naming.ts'
+import { WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_NAME } from '../../shared/mcp-search.ts'
 import type { Db } from '../db/types.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { VERSION } from '../lib/version.ts'
 import { logMcp } from './logs.ts'
+import { isWebSearchVisible, runWebSearch } from './search.ts'
 import type { McpRouteInfo } from './transport-log.ts'
 import { getUpstreamClient, listToolsCached } from './upstream.ts'
 
@@ -116,7 +118,7 @@ export function createHubServer(opts: HubOptions): Server {
    * 会拖垮整组）：initialize 未宣告 tools 能力时直接不请求（SDK 会在发出请求前抛错），
    * 宣告了但 tools/list 回 MethodNotFound（-32601）同样视为空（与能力发现同一协议约定）。
    */
-  async function loadExposedTools(): Promise<ExposedTools> {
+  async function loadExposedTools(webSearchVisible: boolean): Promise<ExposedTools> {
     const results = await Promise.allSettled(
       enabled.map(async (s) => {
         const client = await getUpstreamClient(s, opts.isNode)
@@ -151,7 +153,7 @@ export function createHubServer(opts: HubOptions): Server {
         })
       }
     }
-    const names = assignExposedToolNames(entries)
+    const names = assignExposedToolNames(entries, webSearchVisible ? [WEB_SEARCH_TOOL_NAME] : [])
     const table = new Map<string, ExposedTool>()
     entries.forEach((entry, i) => {
       table.set(names[i], { server: entry.server, rawName: entry.rawName, tool: { ...entry.tool, name: names[i] } })
@@ -257,9 +259,10 @@ export function createHubServer(opts: HubOptions): Server {
   server.setRequestHandler(
     ListToolsRequestSchema,
     guard(async () => {
+      const webSearchVisible = await isWebSearchVisible(db, opts.groupName)
       const overrides = await loadOverrides()
       const startedAt = Date.now()
-      const { table, failures } = await loadExposedTools()
+      const { table, failures } = await loadExposedTools(webSearchVisible)
       for (const failure of failures) await logUpstreamFailure(failure.server.name, 'tools/list', failure.error, startedAt)
       if (failures.length > 0) {
         throw new McpError(
@@ -268,10 +271,13 @@ export function createHubServer(opts: HubOptions): Server {
         )
       }
       return {
-        tools: [...table.values()].map(({ server, rawName, tool }) => ({
-          ...tool,
-          description: `[${server.name}] ${overrides.get(`${server.id}:tool:${rawName}`) ?? tool.description ?? ''}`,
-        })),
+        tools: [
+          ...(webSearchVisible ? [WEB_SEARCH_TOOL] : []),
+          ...[...table.values()].map(({ server, rawName, tool }) => ({
+            ...tool,
+            description: `[${server.name}] ${overrides.get(`${server.id}:tool:${rawName}`) ?? tool.description ?? ''}`,
+          })),
+        ],
       }
     }),
   )
@@ -283,10 +289,20 @@ export function createHubServer(opts: HubOptions): Server {
   // 上游结果原样返回（isError 透传），错误过 sanitizeError
   server.setRequestHandler(
     CallToolRequestSchema,
-    guard(async (request: CallToolRequest, extra: { requestId: RequestId }) => {
+    guard(async (request: CallToolRequest, extra: { requestId: RequestId; signal: AbortSignal }) => {
       const fullName = request.params?.name ?? ''
+      const webSearchVisible = await isWebSearchVisible(db, opts.groupName)
+      if (fullName === WEB_SEARCH_TOOL_NAME && webSearchVisible) {
+        return runWebSearch({
+          db,
+          isNode: opts.isNode,
+          args: request.params?.arguments,
+          signal: extra.signal,
+          onSelected: (serverName) => opts.onRoute?.({ id: extra.requestId, server_name: serverName }),
+        })
+      }
       const startedAt = Date.now()
-      const { table, failures } = await loadExposedTools()
+      const { table, failures } = await loadExposedTools(webSearchVisible)
       // 解析用的上游 tools/list 失败同样留痕（否则这条客户端请求只能看到“无法解析”）
       for (const failure of failures) await logUpstreamFailure(failure.server.name, 'tools/list', failure.error, startedAt)
       if (failures.length > 0) {

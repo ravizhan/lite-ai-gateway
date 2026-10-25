@@ -37,8 +37,8 @@ export interface McpLogContext {
   db: Db
   groupName: string | null
   /**
-   * 把落库挂到请求生命周期（Node/Workers 通用）。长连接 SSE 会话在每次请求时刷新它，
-   * 关闭补记（flush）才有存活窗口；落库本体在 send 内已 await，不依赖此钩子。
+   * 把落库挂到请求生命周期（Node/Workers 通用）。Node SSE 每次 POST 刷新它，
+   * Workers SSE 使用持续存活的 GET 上下文；落库本体在 send 内已 await，不依赖此钩子。
    */
   waitUntil?: (promise: Promise<void>) => void
 }

@@ -189,6 +189,28 @@ CREATE TABLE IF NOT EXISTS mcp_prompt_overrides (
   PRIMARY KEY (server_id, kind, name)
 );
 
+-- 内置 web_search 上游绑定：身份 (server_id, tool_name)，每次调用按绑定行等概率抽一家。
+-- request_code/response_code 是用户可编辑的 QuickJS 转换；preset_id/preset_version 只记录
+-- 来源，运行时只读绑定行代码。不写 mcp_capabilities、不伪造 mcp_servers 行。
+CREATE TABLE IF NOT EXISTS mcp_search_upstreams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  tool_name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  request_code TEXT NOT NULL,
+  response_code TEXT NOT NULL,
+  preset_id TEXT,
+  preset_version INTEGER,
+  UNIQUE (server_id, tool_name),
+  CHECK ((preset_id IS NULL AND preset_version IS NULL)
+    OR (preset_id IS NOT NULL AND preset_version IS NOT NULL AND preset_version > 0))
+);
+
+-- 分组本地 web_search 开关：有行 = 开启，无行 = 关闭。
+CREATE TABLE IF NOT EXISTS mcp_group_web_search (
+  group_id INTEGER PRIMARY KEY REFERENCES mcp_groups(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS mcp_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL DEFAULT (datetime('now')),

@@ -3,6 +3,7 @@ import { registerInfo } from './info.ts'
 import { registerKeys } from './keys.ts'
 import { registerLogs } from './logs.ts'
 import { registerMcp } from './mcp.ts'
+import { registerMcpSearch } from './mcp-search.ts'
 import { registerModels } from './models.ts'
 import { registerPrices } from './prices.ts'
 import { registerProviders } from './providers.ts'
@@ -21,5 +22,6 @@ export function registerAdmin(app: H3): void {
   registerStats(app)
   registerInfo(app)
   registerMcp(app)
+  registerMcpSearch(app)
   registerSettings(app)
 }

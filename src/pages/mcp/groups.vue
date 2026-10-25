@@ -5,15 +5,13 @@ import type {
   McpCapabilitiesResult,
   McpCapabilityKind,
   McpGroupCapabilitySelection,
-  McpGroupRow,
+  McpGroupWithCapabilities,
   McpServerCapabilities,
 } from '../../../shared/api'
 import { useI18n } from 'vue-i18n'
 
 const toast = useToast()
 const { t } = useI18n()
-
-type GroupWithCapabilities = McpGroupRow & { capabilities: McpGroupCapabilitySelection[] }
 
 const KINDS: McpCapabilityKind[] = ['tool', 'prompt', 'resource']
 const KIND_ICONS: Record<McpCapabilityKind, string> = {
@@ -22,7 +20,7 @@ const KIND_ICONS: Record<McpCapabilityKind, string> = {
   resource: 'i-lucide-database',
 }
 
-const groups = ref<GroupWithCapabilities[]>([])
+const groups = ref<McpGroupWithCapabilities[]>([])
 const capabilityServers = ref<McpServerCapabilities[]>([])
 const selectedId = ref<number | null>(null)
 const newName = ref('')
@@ -30,7 +28,7 @@ const creating = ref(false)
 const saving = ref(false)
 const loading = ref(false)
 const capsLoading = ref(false)
-const deleting = ref<GroupWithCapabilities | null>(null)
+const deleting = ref<McpGroupWithCapabilities | null>(null)
 const deleteLoading = ref(false)
 const showDelete = computed({
   get: () => deleting.value !== null,
@@ -39,7 +37,7 @@ const showDelete = computed({
   },
 })
 
-const form = reactive({ name: '', description: '', selected: new Set<string>() })
+const form = reactive({ name: '', description: '', selected: new Set<string>(), webSearch: false })
 const nameError = ref('')
 const expandedServers = ref<string[]>([])
 
@@ -51,10 +49,26 @@ function keyOf(serverId: number, kind: McpCapabilityKind, name: string) {
 
 watch(selected, (g) => {
   form.selected = new Set(g ? g.capabilities.map((c) => keyOf(c.server_id, c.kind, c.name)) : [])
+  form.webSearch = g?.web_search === 1
   form.name = g?.name ?? ''
   form.description = g?.description ?? ''
   nameError.value = ''
 })
+
+function groupCount(g: McpGroupWithCapabilities) {
+  return g.capabilities.length + (g.web_search === 1 ? 1 : 0)
+}
+
+const selectedCount = computed(() => form.selected.size + (form.webSearch ? 1 : 0))
+
+const groupEndpoint = computed(() =>
+  selected.value ? `${window.location.origin}/mcp/${encodeURIComponent(selected.value.name)}` : '',
+)
+
+function clearAll() {
+  form.selected = new Set()
+  form.webSearch = false
+}
 
 function capsOf(server: McpServerCapabilities, kind: McpCapabilityKind) {
   return server.capabilities.filter((c) => c.kind === kind).sort((a, b) => a.name.localeCompare(b.name))
@@ -110,7 +124,7 @@ async function loadAll() {
   capsLoading.value = true
   try {
     const [g, caps] = await Promise.all([
-      api<GroupWithCapabilities[]>('/api/admin/mcp/groups'),
+      api<McpGroupWithCapabilities[]>('/api/admin/mcp/groups'),
       api<McpCapabilitiesResult>('/api/admin/mcp/capabilities'),
     ])
     groups.value = g
@@ -127,7 +141,7 @@ async function createGroup() {
   if (!newName.value.trim()) return
   creating.value = true
   try {
-    const created = await api<GroupWithCapabilities>('/api/admin/mcp/groups', {
+    const created = await api<McpGroupWithCapabilities>('/api/admin/mcp/groups', {
       method: 'POST',
       body: { name: newName.value.trim() },
     })
@@ -170,7 +184,7 @@ async function saveGroup() {
     })
     await api(`/api/admin/mcp/groups/${selected.value.id}`, {
       method: 'PUT',
-      body: { name: form.name.trim(), description: form.description, capabilities },
+      body: { name: form.name.trim(), description: form.description, capabilities, web_search: form.webSearch ? 1 : 0 },
     })
     toast.add({ title: t('mcpGroups.saved'), color: 'success' })
     await loadAll()
@@ -204,7 +218,7 @@ async function saveGroup() {
       >
         <span class="min-w-0 truncate">{{ g.name }}</span>
         <span class="flex shrink-0 items-center gap-1">
-          <UBadge color="neutral" variant="subtle" size="sm">{{ g.capabilities.length }}</UBadge>
+          <UBadge color="neutral" variant="subtle" size="sm">{{ groupCount(g) }}</UBadge>
           <UTooltip :text="t('mcpGroups.deleteGroup')">
             <UButton
               size="xs"
@@ -236,17 +250,24 @@ async function saveGroup() {
         <UFormField :label="t('mcpGroups.includedCapabilities')">
           <div class="flex flex-col gap-2 rounded-md border border-(--ui-border) p-3">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-xs text-(--ui-text-muted)">{{ t('mcpGroups.selectedCount', { count: form.selected.size }) }}</span>
+              <span class="text-xs text-(--ui-text-muted)">{{ t('mcpGroups.selectedCount', { count: selectedCount }) }}</span>
               <UButton
                 size="xs"
                 color="neutral"
                 variant="ghost"
                 icon="i-lucide-rotate-ccw"
                 :label="t('mcpGroups.clearAll')"
-                :disabled="!form.selected.size"
-                @click="form.selected = new Set()"
+                :disabled="!selectedCount"
+                @click="clearAll"
               />
             </div>
+
+            <UCheckbox
+              v-model="form.webSearch"
+              :label="t('mcpGroups.webSearch')"
+              :description="t('mcpGroups.webSearchHelp')"
+              class="rounded-md border border-(--ui-border) px-3 py-2.5"
+            />
 
             <div v-if="capsLoading" class="flex flex-col gap-2">
               <USkeleton v-for="i in 3" :key="i" class="h-10 w-full" />
@@ -302,6 +323,14 @@ async function saveGroup() {
             </div>
           </div>
         </UFormField>
+
+        <div class="flex flex-col gap-1.5 rounded-md border border-(--ui-border) px-3 py-2.5">
+          <span v-if="selected.web_search === 1" class="text-xs text-(--ui-text-muted)">{{ t('mcpGroups.webSearchEndpoint') }}</span>
+          <div class="flex min-w-0 items-center gap-2">
+            <code class="min-w-0 flex-1 break-all rounded bg-(--ui-bg-muted) px-2 py-1 font-mono text-xs text-(--ui-text)">{{ groupEndpoint }}</code>
+            <CopyButton :text="groupEndpoint" />
+          </div>
+        </div>
 
         <div class="flex justify-end border-t border-(--ui-border) pt-4">
           <UButton :label="t('mcpGroups.saveGroup')" :loading="saving" @click="saveGroup" />

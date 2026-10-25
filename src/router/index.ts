@@ -14,6 +14,7 @@ export const router = createRouter({
         { path: 'models', name: 'models', component: () => import('../pages/models.vue') },
         { path: 'logs', name: 'logs', component: () => import('../pages/logs.vue') },
         { path: 'mcps/servers', name: 'mcp-servers', component: () => import('../pages/mcp/servers.vue') },
+        { path: 'mcps/search', name: 'mcp-search', component: () => import('../pages/mcp/search.vue') },
         { path: 'mcps/tools', name: 'mcp-tools', component: () => import('../pages/mcp/tools.vue') },
         { path: 'mcps/groups', name: 'mcp-groups', component: () => import('../pages/mcp/groups.vue') },
         { path: 'mcps/logs', name: 'mcp-logs', component: () => import('../pages/mcp/logs.vue') },

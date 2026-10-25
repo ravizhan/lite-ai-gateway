@@ -13,6 +13,7 @@ import type {
   McpCapabilitySnapshot,
   McpGroupCapabilitySelection,
   McpGroupRow,
+  McpGroupWithCapabilities,
   McpLogRow,
   McpPromptOverrideRow,
   McpServerRow,
@@ -36,9 +37,11 @@ const serverSchema = z.object({
 })
 const serverPatchSchema = serverSchema.partial()
 
+/** 分组写入：web_search 为本地内置工具开关（1 开启 / 0 关闭），与能力白名单互相独立 */
 const groupSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
+  web_search: z.union([z.literal(0), z.literal(1)]).optional(),
 })
 const groupPatchSchema = groupSchema.partial().extend({
   capabilities: z
@@ -433,7 +436,7 @@ export function registerMcp(app: H3): void {
 
   // ---------- MCP 分组 ----------
 
-  // 分组列表：附带能力白名单
+  // 分组列表：附带能力白名单 + 本地 web_search 开关（一次全量读开启表，不逐组查询）
   app.get('/api/admin/mcp/groups', async (event) => {
     requireAdmin(event)
     const db = getDb(event)
@@ -447,7 +450,14 @@ export function registerMcp(app: H3): void {
       if (list) list.push({ server_id: m.server_id, kind: m.kind, name: m.name })
       else byGroup.set(m.group_id, [{ server_id: m.server_id, kind: m.kind, name: m.name }])
     }
-    return groups.map((g) => ({ ...g, capabilities: byGroup.get(g.id) ?? [] }))
+    const webSearchGroups = await db.all<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_search`)
+    const webSearchOn = new Set(webSearchGroups.map((r) => r.group_id))
+    const result: McpGroupWithCapabilities[] = groups.map((g) => ({
+      ...g,
+      capabilities: byGroup.get(g.id) ?? [],
+      web_search: webSearchOn.has(g.id) ? 1 : 0,
+    }))
+    return result
   })
 
   app.post('/api/admin/mcp/groups', async (event) => {
@@ -458,7 +468,12 @@ export function registerMcp(app: H3): void {
     // name 唯一，回查拿完整行
     const row = await db.get<McpGroupRow>(`SELECT * FROM mcp_groups WHERE name = ?`, body.name)
     if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
-    return row
+    // 新建组默认没有能力选择；只有显式 1 才写入开启行
+    if (body.web_search === 1) {
+      await db.run(`INSERT OR IGNORE INTO mcp_group_web_search (group_id) VALUES (?)`, row.id)
+    }
+    const result: McpGroupWithCapabilities = { ...row, capabilities: [], web_search: body.web_search === 1 ? 1 : 0 }
+    return result
   })
 
   app.put('/api/admin/mcp/groups/:id', async (event) => {
@@ -468,6 +483,23 @@ export function registerMcp(app: H3): void {
     const db = getDb(event)
     const exists = await db.get(`SELECT id FROM mcp_groups WHERE id = ?`, id)
     if (!exists) throw new HTTPError({ status: 404, message: 'mcp group not found' })
+    // 先校验能力白名单：无效请求不能先改掉组名/描述/搜索开关
+    if (body.capabilities !== undefined) {
+      for (const c of body.capabilities) {
+        const known = await db.get(
+          `SELECT 1 FROM mcp_capabilities WHERE server_id = ? AND kind = ? AND name = ?`,
+          c.server_id,
+          c.kind,
+          c.name,
+        )
+        if (!known) {
+          throw new HTTPError({
+            status: 400,
+            message: `unknown capability ${c.server_id}:${c.kind}:${c.name}`,
+          })
+        }
+      }
+    }
     const sets: string[] = []
     const params: (string | number)[] = []
     if (body.name !== undefined) {
@@ -483,21 +515,6 @@ export function registerMcp(app: H3): void {
     }
     // capabilities 存在则全量替换能力白名单（先删后插；空数组 = 清空该组全部选择）
     if (body.capabilities !== undefined) {
-      // 每个选择项必须存在于能力快照，避免无效/过期选择落库
-      for (const c of body.capabilities) {
-        const known = await db.get(
-          `SELECT 1 FROM mcp_capabilities WHERE server_id = ? AND kind = ? AND name = ?`,
-          c.server_id,
-          c.kind,
-          c.name,
-        )
-        if (!known) {
-          throw new HTTPError({
-            status: 400,
-            message: `unknown capability ${c.server_id}:${c.kind}:${c.name}`,
-          })
-        }
-      }
       await db.run(`DELETE FROM mcp_group_capabilities WHERE group_id = ?`, id)
       for (const c of body.capabilities) {
         await db.run(
@@ -509,19 +526,27 @@ export function registerMcp(app: H3): void {
         )
       }
     }
+    // web_search 省略保留现状；1 → 开启行，0 → 删行
+    if (body.web_search === 1) {
+      await db.run(`INSERT OR IGNORE INTO mcp_group_web_search (group_id) VALUES (?)`, id)
+    } else if (body.web_search === 0) {
+      await db.run(`DELETE FROM mcp_group_web_search WHERE group_id = ?`, id)
+    }
     const row = await db.get<McpGroupRow>(`SELECT * FROM mcp_groups WHERE id = ?`, id)
     if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
     const members = await db.all<McpGroupCapabilitySelection>(
       `SELECT server_id, kind, name FROM mcp_group_capabilities WHERE group_id = ?`,
       id,
     )
-    return { ...row, capabilities: members }
+    const webSearch = await db.get<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_search WHERE group_id = ?`, id)
+    const result: McpGroupWithCapabilities = { ...row, capabilities: members, web_search: webSearch ? 1 : 0 }
+    return result
   })
 
   app.delete('/api/admin/mcp/groups/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
-    // 分组能力选择靠外键级联删除
+    // 能力选择与 web_search 开启行都靠外键级联删除，无需手工清理
     await getDb(event).run(`DELETE FROM mcp_groups WHERE id = ?`, id)
     return { ok: true }
   })
