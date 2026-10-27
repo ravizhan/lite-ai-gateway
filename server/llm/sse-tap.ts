@@ -1,20 +1,25 @@
 /**
- * sse-tap：字节透传 + 尾部 64KB 环形缓冲的 usage 观察。
+ * sse-tap：字节透传 + usage 观察。
  * - TransformStream 零改写透传（chunk 原样 enqueue）；
- * - 原始字节只追加进定长环形尾缓冲：append 只拷贝入参字节（O(chunk)），超出容量覆盖旧字节，
- *   不做整尾拷贝/分配；流结束后一次性解码解析（CPU O(64KB)，与流长无关）；
+ * - chat：原始字节追加进定长 64KB 环形尾缓冲（append 只拷贝入参字节，O(chunk)），
+ *   流结束后一次性解码解析（CPU O(64KB)，与流长无关）；
+ * - responses：每个 chunk 增量喂给 responses-usage 的 SSE/JSON 状态机，只捕获顶层 type
+ *   与终止事件里的 response.usage；大事件、大字符串不缓存，内存与流长无关；
  * - 记录首个 chunk 到达时刻（relay 用它减上游发起时刻得到 TTFT）；
  * - 由 tap 自己持有 source.pipeTo(writable)（比 pipeThrough 更稳）：正常结束由 flush 解析；
  *   断流时 pipeTo reject，但老版本 Workers 上客户端取消可能让 pipeTo 在 flush 未执行的情况下
  *   直接 resolve，故 resolve/reject 都挂同一兜底回调，finish() 只 settle 一次。
  * 解析失败/无 usage → usageRaw null、error 为普通文本（不掩码，由 relay 落库前 sanitize）。
+ * 观察失败不影响已 enqueue 的字节，也不中止转发。
  */
+
+import { createResponsesUsageObserver } from './responses-usage.ts'
 
 export interface SseTapResult {
   stream: TransformStream<Uint8Array, Uint8Array>
   /** 首个 chunk 到达时刻（performance.now()），未收到任何字节时为 null */
   firstChunkAt: () => number | null
-  /** 流结束后解析尾部缓冲；只 settle 一次 */
+  /** 流结束后返回观察到的用量；只 settle 一次 */
   finish: () => Promise<{ usageRaw: unknown | null; error: string | null }>
 }
 
@@ -80,14 +85,10 @@ class TailRing {
 
 /**
  * 一次性解码尾缓冲，从后往前扫 data: 帧提取 usage：
- * - chat：取含 `usage` 键的对象（客户端带 stream_options.include_usage 时 usage 在倒数第二帧）；
- * - responses：取 response.completed / response.incomplete / response.failed 事件内嵌的 response.usage。
+ * 取含 `usage` 键的对象（客户端带 stream_options.include_usage 时 usage 在倒数第二帧）。
  * 单个 data 行 JSON 解析失败（尾缓冲截断属正常）跳过继续找；全程无 usage 且有过解析失败 → error。
  */
-function parseTail(
-  protocol: 'chat' | 'responses',
-  tail: Uint8Array,
-): { usageRaw: unknown | null; error: string | null } {
+function parseChatTail(tail: Uint8Array): { usageRaw: unknown | null; error: string | null } {
   if (tail.byteLength === 0) return { usageRaw: null, error: null }
   const text = decoder.decode(tail).replace(/\r\n/g, '\n')
   const frames = text.split('\n\n')
@@ -106,18 +107,8 @@ function parseTail(
         sawParseError = true // 截断的不完整帧，跳过继续找
         continue
       }
-      const o = obj as Record<string, unknown>
-      if (protocol === 'chat') {
-        if (typeof o === 'object' && o !== null && 'usage' in o) {
-          return { usageRaw: o.usage, error: null }
-        }
-      } else if (
-        o?.type === 'response.completed' ||
-        o?.type === 'response.incomplete' ||
-        o?.type === 'response.failed'
-      ) {
-        const resp = o.response as Record<string, unknown> | undefined
-        return { usageRaw: resp?.usage ?? null, error: null }
+      if (typeof obj === 'object' && obj !== null && 'usage' in obj) {
+        return { usageRaw: (obj as Record<string, unknown>).usage, error: null }
       }
     }
   }
@@ -128,7 +119,8 @@ export function createSseTap(
   protocol: 'chat' | 'responses',
   source: ReadableStream<Uint8Array>,
 ): SseTapResult {
-  const tail = new TailRing()
+  const chatTail = protocol === 'chat' ? new TailRing() : null
+  const observer = protocol === 'responses' ? createResponsesUsageObserver() : null
   let firstChunkMs: number | null = null
   let settled = false
   let resolveFinish!: (r: { usageRaw: unknown | null; error: string | null }) => void
@@ -146,12 +138,15 @@ export function createSseTap(
     transform(chunk, controller) {
       if (firstChunkMs === null) firstChunkMs = performance.now() // TTFT
       controller.enqueue(chunk) // 字节透传，零改写
-      tail.append(chunk) // 定长尾缓冲：只拷入参字节，超容量覆盖旧字节
+      // 观察在 enqueue 之后：解析问题绝不阻塞或破坏转发
+      if (chatTail !== null) chatTail.append(chunk) // 定长尾缓冲：只拷入参字节，超容量覆盖旧字节
+      else if (observer !== null) observer.write(chunk) // 增量切帧 + JSON 扫描，只保留 usage
     },
     flush() {
-      // 正常结束（source 关闭）：一次性解码解析尾缓冲
+      // 正常结束（source 关闭）：chat 解析尾缓冲；responses 冲刷解码器与最后一帧
       try {
-        settle(parseTail(protocol, tail.view()))
+        if (chatTail !== null) settle(parseChatTail(chatTail.view()))
+        else if (observer !== null) settle(observer.end())
       } catch (err) {
         settle({ usageRaw: null, error: err instanceof Error ? err.message : String(err) })
       }

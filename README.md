@@ -139,7 +139,7 @@ server/                  h3 后端（双运行时共享）
   auth.ts                requireAdmin / requireApiKey
   node.ts / cloudflare.ts  运行时入口（env、DB 注入、SPA 托管 / serve）
   admin/                 管理 CRUD：providers models prices routes keys logs stats info mcp settings
-  llm/                   relay、router、session-affinity、concurrency、usage、sse-tap、embed
+  llm/                   relay、router、session-affinity、concurrency、usage、sse-tap、responses-usage、embed
   mcp/                   hub 聚合、upstream 客户端、streamable-HTTP + SSE（node/workers 两变体）
   db/                    Db 接口 + node:sqlite / D1 适配器 + schema.sql
   lib/                   sanitize、keys、timeout、version、transform（QuickJS）
@@ -186,7 +186,7 @@ curl http://localhost:8788/v1/chat/completions \
 | `POST /v1/embeddings` | Embedding 中转，可带 transform；路由不强制校验供应商类型 |
 | `GET /v1/models` | `model_routes` 中出现过的模型（含 disabled 路由）加 `models` 表中 enabled 的模型 |
 
-流式请求要带 `stream_options.include_usage`，Responses API 同理。网关原样透传请求体，只从响应尾部帧解析 usage；不带这个字段时，该请求的 token 用量和成本都记为 0。
+Chat Completions 流式请求需带 `stream_options.include_usage: true`，网关从响应尾部读取 usage。Responses 无需这个参数，网关增量提取 `response.completed`、`response.incomplete` 或 `response.failed` 中的 `response.usage`，不缓存完整输出，也不受结束事件大小超过 64 KiB 的限制。两种协议都原样透传响应字节；上游没有返回 usage 时，token 用量和成本记为 0。
 
 #### 路由与回退
 
