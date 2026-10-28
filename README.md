@@ -265,9 +265,9 @@ MCP 端点与 LLM 共用 `api_keys` 认证，没有独立的 MCP key。上游 se
 
 #### MCP 日志
 
-经过认证进入 MCP 传输层的请求都会记录输入，包括 initialize、ping、能力列表、工具调用、提示词、资源、通知，以及无效请求和传输层拒绝。`request_body` 保存请求原文；成功时 `response_body` 为 NULL，失败时保存完整响应，JSON-RPC error 和 `isError: true` 的工具结果都算失败。取消或断连且无响应时保留输入并记失败。每个客户端请求记一条 `direction='call'` 日志，内部上游发现失败另记一条 `direction='upstream'`。
+经过认证进入 MCP 传输层的请求都会记录，包括 initialize、ping、工具调用、提示词、资源读取、通知，以及无效请求和传输层拒绝；各类 `*/list` 能力列表请求和 `notifications/initialized` 通知不记录。`request_body` 保存请求原文，`response_body` 保存发给客户端的完整响应（成功和失败都记录），JSON-RPC error 和 `isError: true` 的工具结果记为失败。取消或断连且无响应时保留输入并记失败，`response_body` 为 NULL。每个客户端请求记一条 `direction='call'` 日志，内部上游发现失败另记一条 `direction='upstream'`。
 
-错误摘要会脱敏，但原始请求和失败响应可能含敏感数据，数据库和管理端的访问权限需自行控制。
+错误摘要会脱敏，但原始请求和响应可能含敏感数据，数据库和管理端的访问权限需自行控制。
 
 ## 许可证
 

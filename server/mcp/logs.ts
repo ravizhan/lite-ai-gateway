@@ -15,10 +15,10 @@ export interface McpLogEntry {
   error?: string | null
   /**
    * 入站 JSON-RPC 消息原文（客户端请求 / 通知；协议层之前被拒的请求为原始 HTTP 请求体）。
-   * 成功响应绝不落库；内部上游调用不可观测线上请求体时写合成请求。
+   * 内部上游调用不可观测线上请求体时写合成请求。
    */
   request_body?: string | null
-  /** 仅失败：发给客户端的完整 JSON-RPC 失败响应原文（未截断、未脱敏，与 llm_logs.resp_body 同策略） */
+  /** 发给客户端的完整 JSON-RPC 响应原文（成功与失败均记录；未截断、未脱敏）；无响应时为 null */
   response_body?: string | null
 }
 

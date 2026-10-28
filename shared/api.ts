@@ -144,7 +144,7 @@ export interface McpLogRow {
   error: string | null
   /** 入站 JSON-RPC 消息原文（请求/通知）；协议层前被拒的请求为原始 HTTP 请求体 */
   request_body: string | null
-  /** 仅失败：发给客户端的完整 JSON-RPC 失败响应原文；成功为 null（绝不落输出） */
+  /** 发给客户端的完整 JSON-RPC 响应原文（成功与失败均记录）；通知或无响应时为 null */
   response_body: string | null
 }
 

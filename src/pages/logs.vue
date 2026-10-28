@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../lib/api'
 import { formatLocalTs } from '../lib/time'
 import { usePagedList } from '../composables/usePagedList'
@@ -13,6 +13,10 @@ const { rows, total, page, pageSize, loading, filters, load, search } = usePaged
 )
 
 const providers = ref<ProviderRow[]>([])
+
+// 每 30 秒后台静默拉取当前页（保留筛选与页码，不显示加载态）；标签页隐藏时跳过
+const AUTO_REFRESH_MS = 30_000
+let refreshTimer: ReturnType<typeof setInterval> | undefined
 
 // ---------- 详情弹窗 ----------
 const detailOpen = ref(false)
@@ -37,12 +41,16 @@ const statusOptions = computed(() => [
 
 onMounted(async () => {
   void load()
+  refreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible' && !loading.value) void load({ silent: true })
+  }, AUTO_REFRESH_MS)
   try {
     providers.value = await api<ProviderRow[]>('/api/admin/providers')
   } catch {
     // 过滤选项为辅助数据，失败不阻塞列表
   }
 })
+onBeforeUnmount(() => clearInterval(refreshTimer))
 
 // 点击行 → 拉取完整详情（含 req_body/resp_body）弹窗展示
 async function openDetail(_e: Event, row: { id: string }) {
@@ -221,7 +229,7 @@ function formatBody(raw: string | null): string {
     </UTable>
     <div v-if="total > 0" class="flex flex-wrap items-center justify-between gap-2 border-t border-(--ui-border) px-4 py-3">
       <span class="text-xs text-(--ui-text-muted)">{{ t('logs.count', { count: total }) }}</span>
-      <UPagination v-model:page="page" :total="total" :items-per-page="pageSize" @update:page="load" />
+      <UPagination v-model:page="page" :total="total" :items-per-page="pageSize" @update:page="load()" />
     </div>
   </UCard>
 

@@ -17,12 +17,17 @@ import { logMcp } from './logs.ts'
  * 在 `server.connect(transport)` **之前**包装 transport：`Protocol.connect` 会把已存在的
  * onmessage/onclose 链式包一层（先调我们的，再分发），因此每个入站 JSON-RPC 消息都会先经过
  * 这里；出站响应统一走 `transport.send`（含 SDK 的 MethodNotFound、handler 抛错、
- * tools/call 的 isError 结果）。一次客户端请求 = 恰好一条 `direction='call'` 行：
+ * tools/call 的 isError 结果）。一次客户端请求 = 恰好一条 `direction='call'` 行（`isUnloggedMethod` 的方法除外）：
  *   - request_body = 客户端原始 JSON-RPC 请求 JSON（原文，不截断）
- *   - response_body = 仅失败时的完整 JSON-RPC 响应 JSON（原文，不截断）；成功恒为 null
+ *   - response_body = 发给客户端的完整 JSON-RPC 响应 JSON（成功与失败均记录，原文，不截断）
  *   - 无响应（连接在响应前关闭）→ 关闭时补记一条失败行，response_body=null（不伪造响应）
  * 通知（无 id）即时落一条成功行。客户端发来的响应（无 pending）完全忽略。
  */
+
+/** 不落日志的高频握手/发现方法：各类 `*\/list` 与 `notifications/initialized` */
+function isUnloggedMethod(method: string): boolean {
+  return method.endsWith('/list') || method === 'notifications/initialized'
+}
 
 /** 精确路由结果（hub 的 onRoute 回调提供；避免按前缀猜 server） */
 export interface McpRouteInfo {
@@ -171,13 +176,12 @@ export function instrumentTransport(transport: Transport, ctx: McpLogContext): T
       })
       return
     }
-    // 成功：绝不落输出
-    await logMcp(ctx.db, { ...base, ok: 1, request_body: entry.requestBody, response_body: null })
+    await logMcp(ctx.db, { ...base, ok: 1, request_body: entry.requestBody, response_body: stringifyMessage(response) })
   }
 
   const originalOnmessage = transport.onmessage
   transport.onmessage = (message: JSONRPCMessage, extra?: MessageExtraInfo) => {
-    if (isJSONRPCRequest(message)) {
+    if (isJSONRPCRequest(message) && !isUnloggedMethod(message.method)) {
       const key = keyOf(message.id)
       const previous = pending.get(key)
       if (previous) {
@@ -208,7 +212,7 @@ export function instrumentTransport(transport: Transport, ctx: McpLogContext): T
             ? toolNameFromRequest(message.params)
             : null,
       })
-    } else if (isJSONRPCNotification(message)) {
+    } else if (isJSONRPCNotification(message) && !isUnloggedMethod(message.method)) {
       void track(
         logMcp(ctx.db, {
           direction: 'call',

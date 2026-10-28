@@ -7,6 +7,9 @@
 -- 的列名，缺 cost_pending 时触发器仍会创建成功，直到首次写 prices 才报 "no such column"。
 --   ALTER TABLE llm_logs ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 0;
 -- 之后执行本文件创建回填触发器。存量行默认 cost_pending = 0，视为已冻结、永不重算。
+-- 缺 MCP 日志正文列的存量库另需：
+--   ALTER TABLE mcp_logs ADD COLUMN request_body TEXT;
+--   ALTER TABLE mcp_logs ADD COLUMN response_body TEXT;
 
 CREATE TABLE IF NOT EXISTS providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,7 +226,7 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
   ok INTEGER NOT NULL,
   error TEXT,
   request_body TEXT, -- 入站 JSON-RPC 消息原文（请求/通知；协议层前被拒的请求为原始 HTTP 请求体）；内部上游行为合成请求
-  response_body TEXT -- 仅失败：发给客户端的完整 JSON-RPC 失败响应原文；成功为 NULL（绝不落输出）
+  response_body TEXT -- 发给客户端的完整 JSON-RPC 响应原文（成功与失败均记录）；通知或无响应为 NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_logs_ts ON mcp_logs(ts);

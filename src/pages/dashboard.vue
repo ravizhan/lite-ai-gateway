@@ -20,6 +20,8 @@ const bucketSecondsByRange: Record<number, number> = {
 }
 const range = ref(86400)
 const stats = ref<StatsResult | null>(null)
+/** 已加载数据对应的查询窗口（毫秒）与分桶粒度（秒），用于补齐无数据的时间桶 */
+const loadedWindow = ref<{ fromMs: number; toMs: number; bucket: number } | null>(null)
 const loading = ref(false)
 const error = ref(false)
 const loadedRange = ref<number | null>(null)
@@ -33,10 +35,13 @@ async function load() {
   error.value = false
   const requestedRange = range.value
   try {
-    const from = new Date(Date.now() - requestedRange * 1000).toISOString()
+    const toMs = Date.now()
+    const fromMs = toMs - requestedRange * 1000
+    const bucket = bucketSecondsByRange[requestedRange]!
     stats.value = await api<StatsResult>('/api/admin/stats', {
-      query: { from, bucket: bucketSecondsByRange[requestedRange] },
+      query: { from: new Date(fromMs).toISOString(), bucket },
     })
+    loadedWindow.value = { fromMs, toMs, bucket }
     loadedRange.value = requestedRange
   } catch {
     // 失败时保持旧数据，下次切换范围或点击重试
@@ -65,11 +70,22 @@ const cacheRate = computed(() => {
   return t && t.prompt_tokens > 0 ? (t.cached_tokens / t.prompt_tokens) * 100 : 0
 })
 
-/** 按模型分桶 → 指标图共用的（时间戳 × 模型）矩阵 */
+/**
+ * 按模型分桶 → 指标图共用的（时间戳 × 模型）矩阵。
+ * 时间轴按查询窗口与分桶粒度连续生成（与服务端 strftime('%Y-%m-%dT%H:%M:00Z') 同格式），无数据的桶记 0，
+ * 保证横轴间距等于真实时间间隔。
+ */
 const modelMatrix = computed(() => {
   void themeVersion.value
   const buckets = stats.value?.modelBuckets ?? []
-  const timestamps = [...new Set(buckets.map((b) => b.ts))].sort()
+  const window = loadedWindow.value
+  const timestamps: string[] = []
+  if (window && buckets.length) {
+    const step = window.bucket * 1000
+    for (let ms = Math.floor(window.fromMs / step) * step; ms <= window.toMs; ms += step) {
+      timestamps.push(`${new Date(ms).toISOString().slice(0, 16)}:00Z`)
+    }
+  }
   const tsIndex = new Map(timestamps.map((ts, i) => [ts, i]))
   const models = [...new Set(buckets.map((b) => b.model))].sort()
 
@@ -79,9 +95,9 @@ const modelMatrix = computed(() => {
   const rows = models.map((model, i) => ({
     name: model,
     color: palette[i % palette.length]!,
-    tokens: new Array<number | null>(timestamps.length).fill(null),
-    cost: new Array<number | null>(timestamps.length).fill(null),
-    requests: new Array<number | null>(timestamps.length).fill(null),
+    tokens: new Array<number>(timestamps.length).fill(0),
+    cost: new Array<number>(timestamps.length).fill(0),
+    requests: new Array<number>(timestamps.length).fill(0),
   }))
   const rowOf = new Map(rows.map((r) => [r.name, r]))
 
@@ -89,9 +105,9 @@ const modelMatrix = computed(() => {
     const row = rowOf.get(b.model)
     const i = tsIndex.get(b.ts)
     if (!row || i == null) continue
-    row.tokens[i] = (row.tokens[i] ?? 0) + b.tokens
-    row.cost[i] = (row.cost[i] ?? 0) + b.cost
-    row.requests[i] = (row.requests[i] ?? 0) + b.requests
+    row.tokens[i]! += b.tokens
+    row.cost[i]! += b.cost
+    row.requests[i]! += b.requests
   }
   return { timestamps, rows }
 })

@@ -14,18 +14,14 @@ const { rows, total, page, pageSize, loading, filters, load, search } = usePaged
 const methodOptions = computed(() => [
   { label: t('mcpLogs.allMethods'), value: null },
   { label: 'initialize', value: 'initialize' },
-  { label: 'notifications/initialized', value: 'notifications/initialized' },
   { label: 'ping', value: 'ping' },
-  { label: 'tools/list', value: 'tools/list' },
   { label: 'tools/call', value: 'tools/call' },
-  { label: 'prompts/list', value: 'prompts/list' },
   { label: 'prompts/get', value: 'prompts/get' },
-  { label: 'resources/list', value: 'resources/list' },
   { label: 'resources/read', value: 'resources/read' },
 ])
 
 // ---------- 详情弹窗 ----------
-// 列表行已带完整请求体与失败响应体（SELECT *），点击行直接展示，无需二次请求
+// 列表行已带完整请求体与响应体（SELECT *），点击行直接展示，无需二次请求
 const detail = ref<McpLogRow | null>(null)
 
 const detailOpen = computed({
@@ -39,7 +35,7 @@ function openDetail(_e: Event, row: { original: McpLogRow }) {
   detail.value = row.original
 }
 
-/** 请求/失败响应体：能解析成 JSON 就美化缩进，否则按原文展示 */
+/** 请求/响应体：能解析成 JSON 就美化缩进，否则按原文展示 */
 function formatBody(raw: string | null): string {
   if (!raw) return ''
   try {
@@ -117,7 +113,7 @@ onMounted(() => {
     </UTable>
     <div v-if="total > 0" class="flex flex-wrap items-center justify-between gap-2 border-t border-(--ui-border) px-4 py-3">
       <span class="text-xs text-(--ui-text-muted)">{{ t('mcpLogs.entries', { count: total }) }}</span>
-      <UPagination v-model:page="page" :total="total" :items-per-page="pageSize" @update:page="load" />
+      <UPagination v-model:page="page" :total="total" :items-per-page="pageSize" @update:page="load()" />
     </div>
   </UCard>
 
@@ -191,11 +187,7 @@ onMounted(() => {
           {{ t('mcpLogs.noRequestBody') }}
         </div>
 
-        <!-- 成功调用不记录响应体，只有失败时才展示上游原始响应 -->
-        <UCollapsible
-          v-if="detail.ok !== 1 && detail.response_body"
-          class="rounded-md border border-(--ui-border)"
-        >
+        <UCollapsible v-if="detail.response_body" class="rounded-md border border-(--ui-border)">
           <div class="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 hover:bg-(--ui-bg-elevated)">
             <span class="flex items-center gap-1.5 text-xs font-semibold text-(--ui-text-highlighted)">
               <UIcon
