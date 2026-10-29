@@ -1,5 +1,5 @@
-import type { H3, H3Event } from 'h3'
-import { HTTPError, getRouterParam, readBody } from 'h3'
+import type { H3 } from 'h3'
+import { HTTPError, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
@@ -7,6 +7,7 @@ import { sanitizeError } from '../lib/sanitize.ts'
 import { discoveryTimeout } from '../lib/timeout.ts'
 import { checkTransform } from '../lib/transform.ts'
 import type { DiscoverResult, ModelRow, ProviderModelsSyncResult, ProviderRow } from '../../shared/api.ts'
+import { mustGet, parseBody, routeId } from './common.ts'
 import { deleteModelRow } from './models.ts'
 
 /** 供应商字段 schema（POST 全必填；PUT 用 partial 全可选） */
@@ -37,22 +38,6 @@ const modelsSyncSchema = z.object({
 /** base_url 归一化：去掉尾部斜杠 */
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, '')
-}
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
-
-/** 路由参数 id 解析（非法 → 400） */
-function routeId(event: H3Event): number {
-  const id = Number(getRouterParam(event, 'id'))
-  if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
-  return id
 }
 
 export function registerProviders(app: H3): void {
@@ -93,9 +78,7 @@ export function registerProviders(app: H3): void {
       type === 'embedding' ? (body.transform_code ?? '') : '',
     )
     // name 唯一，回查拿完整行（含 created_at）
-    const row = await db.get<ProviderRow>(`SELECT * FROM providers WHERE name = ?`, body.name)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
-    return row
+    return mustGet<ProviderRow>(db, `SELECT * FROM providers WHERE name = ?`, body.name)
   })
 
   // 更新供应商（仅更新出现的字段）
@@ -156,9 +139,7 @@ export function registerProviders(app: H3): void {
     if (sets.length > 0) {
       await db.run(`UPDATE providers SET ${sets.join(', ')} WHERE id = ?`, ...params, id)
     }
-    const row = await db.get<ProviderRow>(`SELECT * FROM providers WHERE id = ?`, id)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
-    return row
+    return mustGet<ProviderRow>(db, `SELECT * FROM providers WHERE id = ?`, id)
   })
 
   // 删除供应商（models / model_routes 靠外键级联删除）

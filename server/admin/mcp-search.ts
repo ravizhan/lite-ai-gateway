@@ -1,5 +1,5 @@
-import type { H3, H3Event } from 'h3'
-import { HTTPError, getRouterParam, readBody } from 'h3'
+import type { H3 } from 'h3'
+import { HTTPError, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
@@ -8,6 +8,7 @@ import { sanitizeError } from '../lib/sanitize.ts'
 import { checkTransformSyntax } from '../lib/transform.ts'
 import { previewSearchTransform } from '../mcp/search.ts'
 import { MCP_SEARCH_PRESETS } from '../mcp/search-presets.ts'
+import { isUniqueViolation, mustGet, parseBody, routeId } from './common.ts'
 import { WEB_SEARCH_TOOL, webSearchRequestSchema } from '../../shared/mcp-search.ts'
 import type {
   McpSearchPresetsResult,
@@ -68,22 +69,6 @@ const previewSchema = z.discriminatedUnion('stage', [
   }),
 ])
 
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
-
-/** 路由参数 id 解析（非法 → 400） */
-function routeId(event: H3Event): number {
-  const id = Number(getRouterParam(event, 'id'))
-  if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
-  return id
-}
-
 /** 列表/单条查询：JOIN 服务器展示信息 + 能力快照可用性（不触发发现、不带凭据） */
 const ITEM_SELECT = `SELECT u.id, u.server_id, u.tool_name, u.enabled, u.request_code, u.response_code,
     u.preset_id, u.preset_version,
@@ -99,15 +84,10 @@ interface SearchUpstreamRow extends McpSearchUpstreamRow {
   server_name: string
   server_type: McpServerType
   server_enabled: number
-  tool_available: number
+  tool_available: 0 | 1
 }
 
-/** SQLite 的 UNIQUE 冲突（node:sqlite / D1 文本一致）→ 并发重复绑定统一映射 409 */
-function isUniqueViolation(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /unique constraint failed/i.test(message)
-}
-
+/** 并发重复绑定 → 409 */
 function duplicateError(): HTTPError {
   return new HTTPError({ status: 409, message: 'search tool already configured for this server' })
 }
@@ -154,10 +134,7 @@ async function requireTransformSyntax(
 
 /** 读回单条绑定（写入后的完整响应） */
 async function readItem(db: Db, id: number): Promise<McpSearchUpstreamItem> {
-  const row = await db.get<SearchUpstreamRow>(`${ITEM_SELECT} WHERE u.id = ?`, id)
-  if (!row) throw new HTTPError({ status: 500, message: 'failed to read search upstream' })
-  // tool_available 归一为 0 | 1（CASE EXISTS 已返回 0/1，这里只收窄类型）
-  return { ...row, tool_available: row.tool_available === 1 ? 1 : 0 }
+  return mustGet<SearchUpstreamRow>(db, `${ITEM_SELECT} WHERE u.id = ?`, id)
 }
 
 /** 搜索上游绑定 + 纯转换预览（管理 API；每个 handler 内 requireAdmin） */
@@ -166,8 +143,7 @@ export function registerMcpSearch(app: H3): void {
 
   app.get('/api/admin/mcp/search/upstreams', async (event) => {
     requireAdmin(event)
-    const rows = await getDb(event).all<SearchUpstreamRow>(`${ITEM_SELECT} ORDER BY u.id`)
-    return rows.map((row) => ({ ...row, tool_available: row.tool_available === 1 ? 1 : 0 }))
+    return getDb(event).all<SearchUpstreamRow>(`${ITEM_SELECT} ORDER BY u.id`)
   })
 
   app.post('/api/admin/mcp/search/upstreams', async (event) => {
@@ -196,12 +172,12 @@ export function registerMcpSearch(app: H3): void {
       if (isUniqueViolation(error)) throw duplicateError()
       throw error
     }
-    const row = await db.get<{ id: number }>(
+    const row = await mustGet<{ id: number }>(
+      db,
       `SELECT id FROM mcp_search_upstreams WHERE server_id = ? AND tool_name = ?`,
       body.server_id,
       body.tool_name,
     )
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
     return readItem(db, row.id)
   })
 

@@ -20,7 +20,6 @@ let refreshTimer: ReturnType<typeof setInterval> | undefined
 
 // ---------- 详情弹窗 ----------
 const detailOpen = ref(false)
-const detailLoading = ref(false)
 const detail = ref<LlmLogRow | null>(null)
 
 const protocolOptions = computed(() => [
@@ -55,14 +54,11 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
 // 点击行 → 拉取完整详情（含 req_body/resp_body）弹窗展示
 async function openDetail(_e: Event, row: { id: string }) {
   detailOpen.value = true
-  detailLoading.value = true
   detail.value = rows.value.find((r) => String(r.id) === row.id) ?? null
   try {
     detail.value = await api<LlmLogRow>(`/api/admin/logs/${row.id}`)
   } catch {
     // 详情拉取失败时保留列表行数据展示
-  } finally {
-    detailLoading.value = false
   }
 }
 
@@ -239,12 +235,7 @@ function formatBody(raw: string | null): string {
     :ui="{ content: 'max-w-3xl' }"
   >
     <template #body>
-      <div v-if="detailLoading && !detail" class="flex flex-col gap-2">
-        <USkeleton class="h-5 w-full" />
-        <USkeleton class="h-5 w-2/3" />
-        <USkeleton class="h-32 w-full" />
-      </div>
-      <div v-else-if="detail" class="flex flex-col gap-4 text-sm">
+      <div v-if="detail" class="flex flex-col gap-4 text-sm">
         <div class="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
           <div>
             <div class="text-xs text-(--ui-text-muted)">{{ t('cols.time') }}</div>

@@ -4,7 +4,7 @@ import type { Paged } from '../../shared/api'
 
 /**
  * 通用服务端分页列表：管理 page/pageSize/loading/filters 并拉取 { rows, total }；filters 值为字符串（USelect/UInput 的 model），api 层负责 String() 化。
- * `load({ silent: true })` 用于后台刷新：不切换 loading（表格不闪骨架），失败时保留现有数据。
+ * `load({ silent: true })` 用于后台刷新：不切换 loading（表格不闪骨架）；拉取失败一律保留现有数据。
  */
 export function usePagedList<T>(path: string, initialFilters: Record<string, string | undefined> = {}) {
   const rows = ref<T[]>([]) as Ref<T[]>
@@ -22,8 +22,8 @@ export function usePagedList<T>(path: string, initialFilters: Record<string, str
       })
       rows.value = data.rows
       total.value = data.total
-    } catch (error) {
-      if (!options.silent) throw error
+    } catch {
+      // 拉取失败保留当前页数据，下一次筛选/刷新再试
     } finally {
       if (!options.silent) loading.value = false
     }

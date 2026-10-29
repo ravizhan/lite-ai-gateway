@@ -4,7 +4,10 @@ import type { AffinityRule } from '../../shared/api'
 import AffinitySourceEditor from '@/components/AffinitySourceEditor.vue'
 
 const rule = defineModel<AffinityRule>('rule', { required: true })
-const props = withDefaults(defineProps<{ index: number; total: number; disabled?: boolean }>(), { disabled: false })
+/** draggableDisabled 仅用于保存期间禁用来源列表的拖拽（原生控件由外层 fieldset 统一禁用） */
+const props = withDefaults(defineProps<{ index: number; total: number; draggableDisabled?: boolean }>(), {
+  draggableDisabled: false,
+})
 const emit = defineEmits<{
   remove: []
   move: [direction: 'up' | 'down']
@@ -29,11 +32,11 @@ function ruleLabel() {
       </div>
 
       <UFormField :label="t('settings.rules.rule.name')" :required="true" class="min-w-48 flex-1">
-        <UInput v-model="rule.name" :placeholder="t('settings.rules.rule.namePlaceholder')" class="w-full" :disabled="props.disabled" />
+        <UInput v-model="rule.name" :placeholder="t('settings.rules.rule.namePlaceholder')" class="w-full" />
       </UFormField>
 
       <UFormField :label="t('settings.rules.rule.enabled')" class="shrink-0">
-        <USwitch v-model="rule.enabled" :aria-label="t('settings.rules.rule.toggleEnabled', { name: ruleLabel() })" :disabled="props.disabled" />
+        <USwitch v-model="rule.enabled" :aria-label="t('settings.rules.rule.toggleEnabled', { name: ruleLabel() })" />
       </UFormField>
 
       <div class="flex flex-wrap items-center gap-1">
@@ -41,7 +44,7 @@ function ruleLabel() {
           size="xs"
           color="neutral"
           variant="ghost"
-          :disabled="props.disabled || props.index === 0"
+          :disabled="props.index === 0"
           :label="t('settings.rules.rule.moveUp')"
           @click="emit('move', 'up')"
         />
@@ -49,7 +52,7 @@ function ruleLabel() {
           size="xs"
           color="neutral"
           variant="ghost"
-          :disabled="props.disabled || props.index === props.total - 1"
+          :disabled="props.index === props.total - 1"
           :label="t('settings.rules.rule.moveDown')"
           @click="emit('move', 'down')"
         />
@@ -58,7 +61,6 @@ function ruleLabel() {
           color="error"
           variant="ghost"
           :label="t('settings.rules.rule.remove')"
-          :disabled="props.disabled"
           @click="emit('remove')"
         />
       </div>
@@ -76,7 +78,6 @@ function ruleLabel() {
             v-model="rule.modelPattern"
             class="w-full font-mono text-sm"
             :placeholder="t('settings.rules.rule.matchAllPlaceholder')"
-            :disabled="props.disabled"
           />
         </UFormField>
         <UFormField :label="t('settings.rules.rule.pathPattern')" :help="t('settings.rules.rule.pathPatternHelp')">
@@ -84,7 +85,6 @@ function ruleLabel() {
             v-model="rule.pathPattern"
             class="w-full font-mono text-sm"
             :placeholder="t('settings.rules.rule.matchAllPlaceholder')"
-            :disabled="props.disabled"
           />
         </UFormField>
         <UFormField :label="t('settings.rules.rule.userAgent')" :help="t('settings.rules.rule.userAgentHelp')">
@@ -92,7 +92,6 @@ function ruleLabel() {
             v-model="rule.userAgent"
             class="w-full"
             :placeholder="t('settings.rules.rule.matchAllPlaceholder')"
-            :disabled="props.disabled"
           />
         </UFormField>
         <UFormField :label="t('settings.rules.rule.valuePattern')" :help="t('settings.rules.rule.valuePatternHelp')">
@@ -100,7 +99,6 @@ function ruleLabel() {
             v-model="rule.valuePattern"
             class="w-full font-mono text-sm"
             :placeholder="t('settings.rules.rule.matchAllPlaceholder')"
-            :disabled="props.disabled"
           />
         </UFormField>
       </div>
@@ -108,7 +106,7 @@ function ruleLabel() {
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <UFormField :label="t('settings.rules.rule.ttl')" :help="t('settings.rules.rule.ttlHelp')">
           <div class="flex items-center gap-2">
-            <UInput v-model.number="rule.ttlSeconds" type="number" min="0" step="1" class="w-full" :disabled="props.disabled" />
+            <UInput v-model.number="rule.ttlSeconds" type="number" min="0" step="1" class="w-full" />
             <span class="shrink-0 text-sm text-(--ui-text-muted)">{{ t('settings.affinity.seconds') }}</span>
           </div>
         </UFormField>
@@ -118,7 +116,7 @@ function ruleLabel() {
         <h3 class="text-sm font-medium text-(--ui-text-highlighted)">{{ t('settings.rules.rule.sourcesTitle') }}</h3>
         <p class="mt-1 text-sm text-(--ui-text-muted)">{{ t('settings.rules.rule.sourcesDescription') }}</p>
         <div class="mt-4">
-          <AffinitySourceEditor v-model="rule.keySources" :disabled="props.disabled" />
+          <AffinitySourceEditor v-model="rule.keySources" :draggable-disabled="props.draggableDisabled" />
         </div>
       </div>
     </div>

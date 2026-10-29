@@ -35,6 +35,21 @@ installNodeMcpBindings()
 
 const app = await createApp('node')
 
+/**
+ * 解析请求路径到磁盘文件：命中实际文件优先；无扩展名的前端路由路径回退 /index.html。
+ * getMeta 与 getContents 共用同一判定，避免两者对 fallback 的理解不一致。
+ */
+async function resolveAsset(id: string): Promise<{ path: string; size: number; mtime: Date } | null> {
+  const direct = join(distDir, normalize(id))
+  const directStat = await stat(direct).catch(() => null)
+  if (directStat?.isFile()) return { path: direct, size: directStat.size, mtime: directStat.mtime }
+  if (id.includes('.')) return null
+  const indexPath = join(distDir, 'index.html')
+  const indexStat = await stat(indexPath).catch(() => null)
+  if (!indexStat?.isFile()) return null
+  return { path: indexPath, size: indexStat.size, mtime: indexStat.mtime }
+}
+
 // 静态资源：自写 node:fs 后端的 serveStatic，挂在 catch-all 路由（rou3 最低优先级，API 路由先匹配），
 // SPA fallback 到 /index.html。不能用 app.use('/**') 中间件——全局中间件先于路由执行会拦截 API。
 app.all('/**', (event) =>
@@ -42,20 +57,12 @@ app.all('/**', (event) =>
     indexNames: ['/index.html'],
     fallthrough: false,
     getMeta: async (id) => {
-      const s = await stat(join(distDir, normalize(id))).catch(() => null)
-      if (s?.isFile()) return { size: s.size, mtime: s.mtime }
-      // SPA fallback：无扩展名的前端路由路径按 /index.html 提供 meta
-      if (!id.includes('.')) {
-        const idx = await stat(join(distDir, 'index.html')).catch(() => null)
-        if (idx?.isFile()) return { size: idx.size, mtime: idx.mtime }
-      }
-      return undefined
+      const asset = await resolveAsset(id)
+      return asset ? { size: asset.size, mtime: asset.mtime } : undefined
     },
     getContents: async (id) => {
-      // SPA fallback：非文件路径回退 /index.html
-      const file = await readFile(join(distDir, normalize(id))).catch(() => null)
-      if (file) return file
-      return readFile(join(distDir, 'index.html')).catch(() => null)
+      const asset = await resolveAsset(id)
+      return asset ? readFile(asset.path).catch(() => null) : null
     },
   }),
 )

@@ -45,7 +45,7 @@ const defaultTokens = computed(() => {
 
 async function save() {
   const target = props.target
-  if (!target || !dirty.value) return
+  if (!target) return
   saving.value = true
   try {
     await api('/api/admin/mcp/prompts', {

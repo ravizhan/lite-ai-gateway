@@ -1,9 +1,10 @@
-import type { H3, H3Event } from 'h3'
-import { HTTPError, getQuery, getRouterParam, readBody } from 'h3'
+import type { H3 } from 'h3'
+import { HTTPError, getQuery, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
 import type { Db } from '../db/types.ts'
+import { isUniqueViolation, mustGet, parseBody, routeId } from './common.ts'
 import type { ModelRow } from '../../shared/api.ts'
 
 /** 手动补录模型（discovered=0，用于 Gemini/Azure 等无兼容 /models 的供应商） */
@@ -18,22 +19,6 @@ const modelPatchSchema = z.object({
   /** 对外模型 id 映射；空串 = 清除映射（回退原始 model） */
   alias: z.string().max(255).optional(),
 })
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
-
-/** 路由参数 id 解析（非法 → 400） */
-function routeId(event: H3Event): number {
-  const id = Number(getRouterParam(event, 'id'))
-  if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
-  return id
-}
 
 /**
  * 删除模型行，并级联清理该供应商下同一对外 id 的 prices / model_routes 行。
@@ -89,18 +74,17 @@ export function registerModels(app: H3): void {
         body.alias ?? '',
       )
     } catch (err) {
-      if (String(err).includes('UNIQUE')) {
+      if (isUniqueViolation(err)) {
         throw new HTTPError({ status: 409, message: 'model already exists for this provider' })
       }
       throw err
     }
-    const row = await db.get<ModelRow>(
+    return mustGet<ModelRow>(
+      db,
       `SELECT * FROM models WHERE provider_id = ? AND model = ?`,
       body.provider_id,
       body.model,
     )
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
-    return row
   })
 
   // 更新模型（启用/禁用、alias 映射）
@@ -124,9 +108,7 @@ export function registerModels(app: H3): void {
     if (sets.length > 0) {
       await db.run(`UPDATE models SET ${sets.join(', ')} WHERE id = ?`, ...params, id)
     }
-    const row = await db.get<ModelRow>(`SELECT * FROM models WHERE id = ?`, id)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
-    return row
+    return mustGet<ModelRow>(db, `SELECT * FROM models WHERE id = ?`, id)
   })
 
   // 删除模型（级联规则见 deleteModelRow）

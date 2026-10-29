@@ -87,13 +87,6 @@ function upstreamErrorDetail(content: ContentBlock[]): string {
     .trim()
 }
 
-/** 已校验并补默认值的统一请求；非法输入由调用方决定错误形态 */
-function normalizeRequest(input: unknown): NormalizedWebSearchRequest {
-  const parsed = webSearchRequestSchema.safeParse(input)
-  if (!parsed.success) throw new Error('invalid web_search request: ' + describeIssues(parsed.error))
-  return parsed.data
-}
-
 /** 解析原始 MCP 结果；校验后才补 content=[]，供转换脚本读取 */
 function normalizeToolResult(payload: unknown): SearchToolResult & { content: ContentBlock[] } {
   const parsed = SearchToolResultSchema.safeParse(payload)
@@ -141,7 +134,7 @@ export async function isWebSearchVisible(db: Db, groupName: string | null): Prom
  * 失败抛出普通 Error（管理 API 统一映射为 HTTP 400）。
  */
 export async function previewSearchTransform(input: McpSearchPreviewRequest): Promise<McpSearchPreviewResult> {
-  const request = normalizeRequest(input.request)
+  const request = input.request
   if (input.stage === 'request') {
     return { output: await transformRequest(input.code, request) }
   }
@@ -156,10 +149,6 @@ export async function previewSearchTransform(input: McpSearchPreviewRequest): Pr
 /** 中止原因分类：调用方取消优先于本模块的 deadline */
 function abortError(deadline: AbortSignal, base: AbortSignal): Error {
   return new Error(deadline.aborted && !base.aborted ? 'web_search timed out' : 'web_search cancelled')
-}
-
-function assertActive(deadline: AbortSignal, base: AbortSignal): void {
-  if (deadline.aborted) throw abortError(deadline, base)
 }
 
 /**
@@ -191,7 +180,7 @@ async function awaitWithDeadline<T>(promise: Promise<T>, deadline: AbortSignal, 
     return await abortable(promise, deadline, base)
   } catch (error) {
     if (deadline.aborted) throw abortError(deadline, base)
-    // SDK 自己的计时器与 deadline 同预算（RequestTimeout），同样不换一家、不重试
+    // SDK 默认请求计时器（60s）与 deadline 同预算，同样不换一家、不重试
     if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
       throw new Error('web_search timed out', { cause: error })
     }
@@ -220,21 +209,12 @@ export async function runWebSearch(options: RunWebSearchOptions): Promise<CallTo
     // 参数非法时不选上游、不执行脚本
     throw new McpError(ErrorCode.InvalidParams, 'invalid web_search arguments', { issues: parsed.error.issues })
   }
-  return execute(
-    { db: options.db, isNode: options.isNode, signal: options.signal, onSelected: options.onSelected },
-    parsed.data,
-  )
-}
-
-async function execute(
-  options: Omit<RunWebSearchOptions, 'args'>,
-  request: NormalizedWebSearchRequest,
-): Promise<CallToolResult> {
+  const request = parsed.data
   const base = options.signal
   const deadline = upstreamTimeout({ timeout_ms: SEARCH_TIMEOUT_MS }, base)
   try {
     // 已取消/已超时的请求不再选上游（避免无意义的读取与日志归属）
-    assertActive(deadline, base)
+    if (deadline.aborted) throw abortError(deadline, base)
     const selected = await selectBinding(options.db, options.isNode)
     if (selected === null) return toolError('web_search: no eligible upstream')
     options.onSelected(selected.server_name)
@@ -243,23 +223,20 @@ async function execute(
     const server = await options.db.get<McpServerRow>('SELECT * FROM mcp_servers WHERE id = ?', selected.server_id)
     if (!server || server.enabled !== 1) return toolError('web_search: selected upstream unavailable')
 
-    assertActive(deadline, base)
     let mapped: Record<string, unknown>
     try {
       mapped = await transformRequest(selected.request_code, request)
     } catch (error) {
       throw new Error(REQUEST_FAILED + messageOf(error), { cause: error })
     }
-    assertActive(deadline, base)
 
     const client: Client = await awaitWithDeadline(getUpstreamClient(server, options.isNode), deadline, base)
-    assertActive(deadline, base)
 
     const raw: SearchToolResult = await awaitWithDeadline(
       client.request(
         { method: 'tools/call', params: { name: selected.tool_name, arguments: mapped } },
         SearchToolResultSchema,
-        { signal: deadline, timeout: SEARCH_TIMEOUT_MS, resetTimeoutOnProgress: false },
+        { signal: deadline, resetTimeoutOnProgress: false },
       ),
       deadline,
       base,
@@ -270,7 +247,6 @@ async function execute(
       const detail = upstreamErrorDetail(raw.content ?? [])
       throw new Error(UPSTREAM_FAILED + (detail === '' ? 'upstream returned isError=true' : detail))
     }
-    assertActive(deadline, base)
 
     let output: WebSearchResponse
     try {
@@ -278,7 +254,6 @@ async function execute(
     } catch (error) {
       throw new Error(RESPONSE_FAILED + messageOf(error), { cause: error })
     }
-    assertActive(deadline, base)
 
     return {
       content: [{ type: 'text', text: JSON.stringify(output) }],

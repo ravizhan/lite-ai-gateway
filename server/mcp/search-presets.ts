@@ -275,7 +275,7 @@ export const MCP_SEARCH_PRESETS: readonly McpSearchPreset[] = [
     tool_name: 'tavily_search',
     request_code: TAVILY_REQUEST_CODE,
     response_code: TAVILY_RESPONSE_CODE,
-    sample_request: { ...SAMPLE_REQUEST },
+    sample_request: SAMPLE_REQUEST,
     sample_response: TAVILY_SAMPLE_RESPONSE,
   },
   {
@@ -285,7 +285,7 @@ export const MCP_SEARCH_PRESETS: readonly McpSearchPreset[] = [
     tool_name: 'web_search_advanced_exa',
     request_code: EXA_REQUEST_CODE,
     response_code: EXA_RESPONSE_CODE,
-    sample_request: { ...SAMPLE_REQUEST },
+    sample_request: SAMPLE_REQUEST,
     sample_response: EXA_SAMPLE_RESPONSE,
   },
   {
@@ -295,7 +295,7 @@ export const MCP_SEARCH_PRESETS: readonly McpSearchPreset[] = [
     tool_name: 'firecrawl_search',
     request_code: FIRECRAWL_REQUEST_CODE,
     response_code: FIRECRAWL_RESPONSE_CODE,
-    sample_request: { ...SAMPLE_REQUEST },
+    sample_request: SAMPLE_REQUEST,
     sample_response: FIRECRAWL_SAMPLE_RESPONSE,
   },
 ]

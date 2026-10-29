@@ -5,6 +5,7 @@ import type { ModelRow, ModelRouteRow, ProviderRow } from '../../shared/api'
 import { useI18n } from 'vue-i18n'
 import { VueDraggable } from 'vue-draggable-plus'
 import PricingPanel from '@/components/PricingPanel.vue'
+import { displayModel } from '@/lib/models'
 
 const toast = useToast()
 const { t } = useI18n()
@@ -17,11 +18,6 @@ const providers = ref<ProviderRow[]>([])
 const models = ref<ModelWithProvider[]>([])
 const routes = ref<RouteWithProvider[]>([])
 const loading = ref(false)
-
-/** 对外模型 id：配置了 alias 时用 alias，否则用原始 model。路由/计费/日志统一使用此 id */
-function displayModel(row: Pick<ModelRow, 'model' | 'alias'>): string {
-  return row.alias !== '' ? row.alias : row.model
-}
 
 async function loadAll() {
   loading.value = true
@@ -139,16 +135,15 @@ watch(showAdd, (v) => {
 
 async function addModel() {
   const providerId = addForm.providerId
-  const validProviderId = typeof providerId === 'number' && Number.isInteger(providerId) && providerId > 0 ? providerId : undefined
-  addErrors.providerId = validProviderId === undefined ? t('models.providerRequired') : ''
+  addErrors.providerId = providerId === undefined ? t('models.providerRequired') : ''
   addErrors.model = addForm.model.trim() ? '' : t('models.modelNameRequired')
-  if (validProviderId === undefined || addErrors.model) return
+  if (providerId === undefined || addErrors.model) return
   addSaving.value = true
   try {
     await api('/api/admin/models', {
       method: 'POST',
       body: {
-        provider_id: validProviderId,
+        provider_id: providerId,
         model: addForm.model.trim(),
         ...(addForm.alias.trim() ? { alias: addForm.alias.trim() } : {}),
       },

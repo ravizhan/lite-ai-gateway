@@ -6,6 +6,8 @@ import {
   isJSONRPCRequest,
   isJSONRPCResultResponse,
   type JSONRPCMessage,
+  type JSONRPCErrorResponse,
+  type JSONRPCResultResponse,
   type RequestId,
 } from '@modelcontextprotocol/sdk/types.js'
 import type { Db } from '../db/types.ts'
@@ -45,7 +47,7 @@ export interface McpLogContext {
    * 把落库挂到请求生命周期（Node/Workers 通用）。Node SSE 每次 POST 刷新它，
    * Workers SSE 使用持续存活的 GET 上下文；落库本体在 send 内已 await，不依赖此钩子。
    */
-  waitUntil?: (promise: Promise<void>) => void
+  waitUntil: (promise: Promise<void>) => void
 }
 
 /** 观察者句柄：hub 的 onRoute 回调写入精确元数据；settled 用于请求返回前等待已入队的落库 */
@@ -63,13 +65,9 @@ interface PendingRequest {
   toolName: string | null
 }
 
-/** 入站请求/通知原文：JSON.stringify 不会失败，兜底 null（不落半截内容） */
-function stringifyMessage(message: JSONRPCMessage): string | null {
-  try {
-    return JSON.stringify(message)
-  } catch {
-    return null
-  }
+/** 入站请求/通知原文：JSON-RPC 报文是纯数据，JSON.stringify 不会失败 */
+function stringifyMessage(message: JSONRPCMessage): string {
+  return JSON.stringify(message)
 }
 
 /** tools/call isError 的错误摘要：取 content 里的文本，取不到用固定摘要 */
@@ -126,11 +124,14 @@ export function instrumentTransport(transport: Transport, ctx: McpLogContext): T
       })
       .finally(() => inflight.delete(chained))
     inflight.add(chained)
-    ctx.waitUntil?.(chained)
+    ctx.waitUntil(chained)
     return chained
   }
 
-  async function persistPending(entry: PendingRequest, response: JSONRPCMessage | null): Promise<void> {
+  async function persistPending(
+    entry: PendingRequest,
+    response: JSONRPCResultResponse | JSONRPCErrorResponse | null,
+  ): Promise<void> {
     const durationMs = Date.now() - entry.startedAt
     const base = {
       direction: 'call' as const,
@@ -160,7 +161,7 @@ export function instrumentTransport(transport: Transport, ctx: McpLogContext): T
       })
       return
     }
-    const result = 'result' in response ? response.result : null
+    const result = response.result
     const isToolError =
       result !== null &&
       typeof result === 'object' &&
@@ -204,7 +205,7 @@ export function instrumentTransport(transport: Transport, ctx: McpLogContext): T
       }
       pending.set(key, {
         method: message.method,
-        requestBody: stringifyMessage(message) ?? '',
+        requestBody: stringifyMessage(message),
         startedAt: Date.now(),
         serverName: null,
         toolName:
@@ -327,7 +328,7 @@ export async function logMcpRejection(
  * 结构合法的 JSON-RPC 单条报文（请求 / 通知 / 响应四选一，等价 SDK 的 JSONRPCMessageSchema，
  * 用于在委托传输层之前判定“结构非法的报文”，否则该 400 拒绝不可观测、无法留痕）。
  */
-export function isJsonRpcMessage(value: unknown): boolean {
+export function isJsonRpcMessage(value: unknown): value is JSONRPCMessage {
   return (
     isJSONRPCRequest(value) ||
     isJSONRPCNotification(value) ||

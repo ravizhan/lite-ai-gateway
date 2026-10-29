@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
+import { ErrorCode, McpError, type Prompt, type Resource, type Tool } from '@modelcontextprotocol/sdk/types.js'
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker'
 import type { McpCapabilityKind, McpServerRow, McpTestResult } from '../../shared/api.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
@@ -11,22 +11,13 @@ import { getNodeMcpBindings } from './node-bindings.ts'
 
 // 模块级缓存（单 isolate/进程内有效）：client 按 server.id 惰性建连；工具列表 TTL 60s
 const clientCache = new Map<number, Promise<Client>>()
-const toolsCache = new Map<number, { tools: unknown[]; fetchedAt: number }>()
+const toolsCache = new Map<number, { tools: Tool[]; fetchedAt: number }>()
 const TOOLS_TTL_MS = 60_000
 /** 单 kind 发现上限（防上游分页游标死循环） */
 const MAX_CAPABILITIES_PER_KIND = 10_000
 
-/**
- * 解析“是否 Node 运行时”：hub 传 boolean；管理端不传
- * （不传时按运行环境推断，Workers 上无 process）。
- */
-function resolveIsNode(flag: boolean | undefined): boolean {
-  if (typeof flag === 'boolean') return flag
-  return typeof process !== 'undefined' && Boolean(process.versions?.node)
-}
-
 /** 按 type 建 transport；stdio/sse 仅 Node（实现由 Node 入口注入，避免进入 Workers bundle） */
-async function createTransport(server: McpServerRow, isNode: boolean): Promise<Transport> {
+function createTransport(server: Omit<McpServerRow, 'id'>, isNode: boolean): Transport {
   if (server.type === 'stdio' || server.type === 'sse') {
     if (!isNode) throw new Error(`runtime unsupported: ${server.type} upstream is node-only`)
     if (server.type === 'stdio') {
@@ -53,8 +44,8 @@ async function createTransport(server: McpServerRow, isNode: boolean): Promise<T
 const jsonSchemaValidator = new CfWorkerJsonSchemaValidator()
 
 /** 新建 client 并 connect；失败时关闭并抛错（不写入缓存） */
-async function createClient(server: McpServerRow, isNode: boolean): Promise<Client> {
-  const transport = await createTransport(server, isNode)
+async function createClient(server: Omit<McpServerRow, 'id'>, isNode: boolean): Promise<Client> {
+  const transport = createTransport(server, isNode)
   const client = new Client({ name: 'lite-ai-gateway', version: VERSION }, { jsonSchemaValidator })
   try {
     await client.connect(transport)
@@ -66,11 +57,10 @@ async function createClient(server: McpServerRow, isNode: boolean): Promise<Clie
 }
 
 /** 取（或建）server 的上游 client，按 server.id 缓存；连接失败清缓存并抛错 */
-export function getUpstreamClient(server: McpServerRow, isNode?: boolean): Promise<Client> {
-  const node = resolveIsNode(isNode)
+export function getUpstreamClient(server: McpServerRow, isNode: boolean): Promise<Client> {
   let pending = clientCache.get(server.id)
   if (!pending) {
-    pending = createClient(server, node).catch((error) => {
+    pending = createClient(server, isNode).catch((error) => {
       clientCache.delete(server.id)
       throw error
     })
@@ -84,7 +74,7 @@ export function getUpstreamClient(server: McpServerRow, isNode?: boolean): Promi
  * 走 listAllPages 全量分页（与能力发现同一实现）：只读第一页会让第二页之后的工具
  * 既无法解析，也不参与去重命名——管理端分组可选择它们，命名范围必须与之一致。
  */
-export async function listToolsCached(server: McpServerRow, client: Client): Promise<unknown[]> {
+export async function listToolsCached(server: McpServerRow, client: Client): Promise<Tool[]> {
   const cached = toolsCache.get(server.id)
   if (cached && Date.now() - cached.fetchedAt < TOOLS_TTL_MS) return cached.tools
   const tools = await listAllPages(client, 'tool')
@@ -104,28 +94,27 @@ export function clearUpstreamCache(): void {
   toolsCache.clear()
 }
 
-/** 连通性测试：绕过缓存新建 client，套 15s 超时（discoveryTimeout(0)），listTools 后关闭 */
-export async function testServer(server: McpServerRow, isNode?: boolean): Promise<McpTestResult> {
-  const node = resolveIsNode(isNode)
-  let client: Client | undefined
+/** 连通性测试：绕过缓存新建 client，connect 套 15s 超时（discoveryTimeout(0)），数完全部工具页后关闭 */
+export async function testServer(server: McpServerRow, isNode: boolean): Promise<McpTestResult> {
+  const signal = discoveryTimeout(0) // 0 → 默认 15s
+  const connecting = createClient(server, isNode)
   try {
-    const transport = await createTransport(server, node)
-    client = new Client({ name: 'lite-ai-gateway', version: VERSION }, { jsonSchemaValidator })
-    // connect 不接受 signal：用 Promise.race + 超时拒绝模拟（超时后走 catch 清理）
-    const signal = discoveryTimeout(0) // 0 → 默认 15s
-    await Promise.race([
-      client.connect(transport),
+    // connect 不接受 signal：用 Promise.race + 超时拒绝模拟
+    const client = await Promise.race([
+      connecting,
       new Promise<never>((_, reject) => {
-        signal.addEventListener('abort', () => reject(new Error('connect timeout')))
+        signal.addEventListener('abort', () => reject(new Error('connect timeout')), { once: true })
       }),
     ])
-    const result = (await client.listTools()) as { tools?: unknown[] }
-    const n = Array.isArray(result.tools) ? result.tools.length : 0
+    const tools = await listAllPages(client, 'tool')
     await client.close()
-    client = undefined
-    return { ok: true, tools: n }
+    return { ok: true, tools: tools.length }
   } catch (error) {
-    await client?.close().catch(() => {})
+    // 超时/失败后连接可能仍在后台建立：等到它落定即关闭，避免连接泄漏
+    void connecting.then(
+      (client) => client.close().catch(() => {}),
+      () => {},
+    )
     return { ok: false, tools: 0, error: sanitizeError(String((error as Error)?.message ?? error)) }
   }
 }
@@ -137,37 +126,37 @@ export interface DiscoveredCapability {
   detail: unknown
 }
 
-/** 按 cursor 分页拉全一个 list（上游不支持分页时只取第一页）；返回原始条目数组 */
-async function listAllPages(client: Client, kind: McpCapabilityKind): Promise<unknown[]> {
-  const items: unknown[] = []
+/** 按 cursor 分页拉全一个 list（上游不支持分页时只取第一页） */
+async function listAllPages(client: Client, kind: 'tool'): Promise<Tool[]>
+async function listAllPages(client: Client, kind: 'prompt'): Promise<Prompt[]>
+async function listAllPages(client: Client, kind: 'resource'): Promise<Resource[]>
+async function listAllPages(client: Client, kind: McpCapabilityKind): Promise<(Tool | Prompt | Resource)[]>
+async function listAllPages(client: Client, kind: McpCapabilityKind): Promise<(Tool | Prompt | Resource)[]> {
+  const items: (Tool | Prompt | Resource)[] = []
   let cursor: string | undefined
   for (;;) {
     const params = cursor ? { cursor } : undefined
-    const result =
-      kind === 'tool'
-        ? await client.listTools(params)
-        : kind === 'prompt'
-          ? await client.listPrompts(params)
-          : await client.listResources(params)
-    const key = kind === 'tool' ? 'tools' : kind === 'prompt' ? 'prompts' : 'resources'
-    const arr = result[key]
-    if (Array.isArray(arr)) items.push(...arr)
-    const next = result.nextCursor
-    if (!next || next === cursor || items.length >= MAX_CAPABILITIES_PER_KIND) break
-    cursor = next
+    let page: { items: (Tool | Prompt | Resource)[]; nextCursor?: string }
+    if (kind === 'tool') {
+      const result = await client.listTools(params)
+      page = { items: result.tools, nextCursor: result.nextCursor }
+    } else if (kind === 'prompt') {
+      const result = await client.listPrompts(params)
+      page = { items: result.prompts, nextCursor: result.nextCursor }
+    } else {
+      const result = await client.listResources(params)
+      page = { items: result.resources, nextCursor: result.nextCursor }
+    }
+    items.push(...page.items)
+    if (!page.nextCursor || page.nextCursor === cursor || items.length >= MAX_CAPABILITIES_PER_KIND) break
+    cursor = page.nextCursor
   }
   return items
 }
 
-/** 条目主键名：resource 用 uri，tool/prompt 用 name（结构不符 → undefined 跳过） */
-function capabilityName(item: unknown, kind: McpCapabilityKind): string | undefined {
-  if (typeof item !== 'object' || item === null) return undefined
-  if (kind === 'resource') {
-    if ('uri' in item && typeof item.uri === 'string') return item.uri
-    return undefined
-  }
-  if ('name' in item && typeof item.name === 'string') return item.name
-  return undefined
+/** 条目主键名：resource 用 uri，tool/prompt 用 name */
+function capabilityName(item: Tool | Prompt | Resource, kind: McpCapabilityKind): string {
+  return kind === 'resource' ? (item as Resource).uri : (item as Tool | Prompt).name
 }
 
 /**
@@ -177,24 +166,21 @@ function capabilityName(item: unknown, kind: McpCapabilityKind): string | undefi
  * 其余任何失败都抛出（调用方必须阻止 DB 变更/启用）。
  */
 export async function discoverCapabilities(
-  server: McpServerRow,
-  isNode?: boolean,
+  server: Omit<McpServerRow, 'id'>,
+  isNode: boolean,
 ): Promise<DiscoveredCapability[]> {
-  const node = resolveIsNode(isNode)
-  let client: Client | undefined
+  const client = new Client({ name: 'lite-ai-gateway', version: VERSION }, { jsonSchemaValidator })
+  // connect / list 均不接受 signal：用 Promise.race + 超时拒绝模拟（超时后走 finally 清理）
+  const signal = discoveryTimeout(0)
+  const timeout = new Promise<never>((_, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('discovery timeout')), { once: true })
+  })
   try {
-    const transport = await createTransport(server, node)
-    client = new Client({ name: 'lite-ai-gateway', version: VERSION }, { jsonSchemaValidator })
-    // connect / list 均不接受 signal：用 Promise.race + 超时拒绝模拟（超时后走 finally 清理）
-    const signal = discoveryTimeout(0)
-    const timeout = new Promise<never>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('discovery timeout')))
-    })
     return await Promise.race([
       (async () => {
-        await client!.connect(transport)
+        await client.connect(createTransport(server, isNode))
         const kinds: McpCapabilityKind[] = ['tool', 'prompt', 'resource']
-        const results = await Promise.allSettled(kinds.map((kind) => listAllPages(client!, kind)))
+        const results = await Promise.allSettled(kinds.map((kind) => listAllPages(client, kind)))
         const caps: DiscoveredCapability[] = []
         for (let i = 0; i < kinds.length; i++) {
           const r = results[i]
@@ -207,7 +193,8 @@ export async function discoverCapabilities(
           const kind = kinds[i]
           for (const item of r.value) {
             const name = capabilityName(item, kind)
-            if (!name) continue
+            // 空名字无法作为能力标识，跳过
+            if (name === '') continue
             caps.push({ kind, name, detail: item })
           }
         }
@@ -216,6 +203,6 @@ export async function discoverCapabilities(
       timeout,
     ])
   } finally {
-    await client?.close().catch(() => {})
+    await client.close().catch(() => {})
   }
 }

@@ -21,10 +21,7 @@ const props = withDefaults(
 const emit = defineEmits<{ confirm: [] }>()
 const open = defineModel<boolean>('open', { default: false })
 
-const description = computed(() => {
-  if (!props.detail) return t('common.cannotUndo')
-  return props.detail.replace(/\.+$/, '') + '.'
-})
+const description = computed(() => (props.detail ? `${props.detail}.` : t('common.cannotUndo')))
 </script>
 
 <template>

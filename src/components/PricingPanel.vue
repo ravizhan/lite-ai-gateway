@@ -2,6 +2,7 @@
 import { useI18n } from 'vue-i18n'
 import type { ModelRow, ModelRouteRow, PriceRow, ProviderRow } from '../../shared/api'
 import { api } from '@/lib/api'
+import { displayModel } from '@/lib/models'
 
 type ModelWithProvider = ModelRow & { provider_name?: string }
 type RouteWithProvider = ModelRouteRow & { provider_name?: string }
@@ -34,9 +35,8 @@ const toast = useToast()
 const { t } = useI18n()
 
 const persistedPrices = ref<PriceRow[]>([])
-const pricesLoaded = ref(false)
+const loaded = ref(false)
 const pricesLoading = ref(false)
-const pricesRefreshing = ref(false)
 const loadError = ref('')
 const searchTerm = ref('')
 const providerFilter = ref<number | null>(null)
@@ -52,39 +52,26 @@ function candidateKey(model: string, providerId: number): string {
   return `${model}\u0000${providerId}`
 }
 
-function displayModel(row: Pick<ModelRow, 'model' | 'alias'>): string {
-  return row.alias || row.model
-}
-
 function clearDraftErrors() {
   draftErrors.input = ''
   draftErrors.output = ''
   draftErrors.cacheRead = ''
 }
 
-async function loadPrices(refresh = false): Promise<void> {
-  if (refresh) pricesRefreshing.value = true
-  else pricesLoading.value = true
+async function loadPrices() {
+  pricesLoading.value = true
   try {
     persistedPrices.value = await api<PriceRow[]>('/api/admin/prices')
-    pricesLoaded.value = true
+    loaded.value = true
     loadError.value = ''
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : t('pricing.loadFailed')
-    throw e
   } finally {
-    if (refresh) pricesRefreshing.value = false
-    else pricesLoading.value = false
+    pricesLoading.value = false
   }
 }
 
-function retryPrices() {
-  void loadPrices(pricesLoaded.value).catch(() => undefined)
-}
-
-onMounted(() => {
-  void loadPrices().catch(() => undefined)
-})
+onMounted(loadPrices)
 
 const providerNames = computed(() => new Map(props.providers.map((provider) => [provider.id, provider.name])))
 
@@ -155,7 +142,7 @@ const filteredGroups = computed<PriceGroup[]>(() => {
   }))
 })
 
-const isLoading = computed(() => props.loading || (!pricesLoaded.value && pricesLoading.value))
+const isLoading = computed(() => props.loading || (!loaded.value && pricesLoading.value))
 const hasCandidates = computed(() => candidates.value.length > 0)
 const isFilteredEmpty = computed(() => hasCandidates.value && filteredCandidates.value.length === 0)
 
@@ -211,7 +198,7 @@ async function savePrice() {
         cache_read_price: parsed.cacheRead,
       },
     })
-    await loadPrices(true)
+    await loadPrices()
     toast.add({ title: t('pricing.saved'), color: 'success' })
     editOpen.value = false
   } catch (e) {
@@ -240,7 +227,7 @@ async function savePrice() {
         <USkeleton v-for="i in 4" :key="i" class="h-12 w-full" />
       </div>
 
-      <div v-else-if="loadError && !pricesLoaded" class="flex flex-col items-center gap-3 py-8 text-center">
+      <div v-else-if="loadError && !loaded" class="flex flex-col items-center gap-3 py-8 text-center">
         <p class="text-sm text-(--ui-text-muted)">{{ loadError }}</p>
         <UButton
           size="sm"
@@ -248,7 +235,7 @@ async function savePrice() {
           icon="i-lucide-refresh-cw"
           :label="t('pricing.retry')"
           :loading="pricesLoading"
-          @click="retryPrices"
+          @click="loadPrices"
         />
       </div>
 
@@ -260,8 +247,8 @@ async function savePrice() {
               color="error"
               variant="outline"
               :label="t('pricing.retry')"
-              :loading="pricesRefreshing"
-              @click="retryPrices"
+              :loading="pricesLoading"
+              @click="loadPrices"
             />
           </template>
         </UAlert>

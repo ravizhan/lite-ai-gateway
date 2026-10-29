@@ -12,7 +12,7 @@ const QUERY_RE = /(\?|&)(key|api_key|token|access_token)=([^&\s]+)/gi
 
 export function sanitizeError(text: string): string {
   // 先掩码再截断：避免长文本在截断处泄露半截密钥
-  return String(text ?? '')
+  return text
     .replace(HEADER_RE, '$1: ***')
     .replace(QUERY_RE, '$1$2=***')
     .slice(0, MAX_LEN)

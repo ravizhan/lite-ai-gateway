@@ -1,12 +1,21 @@
-import { getRequestIP, onDispose, type H3Event } from 'h3'
+import { getRequestIP, type H3Event } from 'h3'
 import { getDb } from '../db/index.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { upstreamTimeout } from '../lib/timeout.ts'
 import { evalTransform } from '../lib/transform.ts'
 import { gatewayError } from '../../shared/api.ts'
 import { acquireQueuedConcurrency, type ConcurrencyPermit } from './concurrency.ts'
-import { resolveExplicitRoute, resolveRoute, type RoutedProvider } from './router.ts'
+import type { RoutedProvider } from './router.ts'
 import { normalizeEmbeddingUsage, type NormalizedUsage } from './usage.ts'
+import {
+  cancelBody,
+  concurrencyStateUnavailable,
+  detailText,
+  readBodyText,
+  readRelayRequestBody,
+  resolveRelayRoute,
+  trackPermit,
+} from './relay-support.ts'
 
 interface EmbeddingLogEntry {
   apiKeyId: number
@@ -53,107 +62,25 @@ async function insertLog(event: H3Event, row: EmbeddingLogEntry): Promise<void> 
   )
 }
 
-async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
-  if (!body) return
-  try {
-    await body.cancel()
-  } catch {
-    // The connection is already ending; permit release must still proceed.
-  }
-}
-
-/** 错误详情捕获上限 256KB（超出截断，防止异常大响应撑爆单行） */
-const MAX_DETAIL_BODY = 256 * 1024
-
-/** 读取整个响应体为文本（截断到 MAX_DETAIL_BODY）；仅错误路径调用 */
-async function readBodyText(body: ReadableStream<Uint8Array> | null): Promise<string | null> {
-  if (!body) return null
-  try {
-    const reader = body.getReader()
-    const chunks: Uint8Array[] = []
-    let len = 0
-    while (len < MAX_DETAIL_BODY) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(value)
-      len += value.byteLength
-    }
-    void reader.cancel().catch(() => {})
-    const all = new Uint8Array(Math.min(len, MAX_DETAIL_BODY))
-    let off = 0
-    for (const c of chunks) {
-      const slice = c.subarray(0, Math.min(c.byteLength, all.byteLength - off))
-      all.set(slice, off)
-      off += slice.byteLength
-      if (off >= all.byteLength) break
-    }
-    return new TextDecoder().decode(all)
-  } catch {
-    return null
-  }
-}
-
 export async function relayEmbeddings(event: H3Event): Promise<Response> {
-  const apiKeyId = event.context.apiKeyId as number | undefined
-  if (apiKeyId === undefined) {
-    return gatewayError(503, 'routing state unavailable', 'api_error')
-  }
+  // 认证由父级 app.ts 挂载的 app.use('/v1/**', apiKeyMw) 完成，到达此处的请求必然带 apiKeyId。
+  const apiKeyId = event.context.apiKeyId as number
 
   const clientIp = getRequestIP(event) ?? null
   const t0 = performance.now()
 
-  let originalRawBody: ArrayBuffer
-  try {
-    originalRawBody = await event.req.arrayBuffer()
-  } catch {
-    return gatewayError(400, 'failed to read request body')
-  }
-
-  let body: Record<string, unknown>
-  let requestedModel: string
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(originalRawBody)) as unknown
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return gatewayError(400, 'invalid JSON body')
-    }
-    body = parsed as Record<string, unknown>
-    if (typeof body.model !== 'string' || body.model.length === 0) {
-      return gatewayError(400, 'missing model parameter')
-    }
-    requestedModel = body.model
-  } catch {
-    return gatewayError(400, 'invalid JSON body')
-  }
+  const request = await readRelayRequestBody(event)
+  if (request instanceof Response) return request
+  const { rawBody, body, text: clientReqBody } = request
+  const requestedModel = request.model
 
   const db = getDb(event)
-  let model = requestedModel
-  let candidates: RoutedProvider[]
-  // 客户端原始请求体文本（仅错误请求落库 req_body；正常请求不使用）
-  const clientReqBody = new TextDecoder().decode(originalRawBody)
-  try {
-    const explicit = await resolveExplicitRoute(db, requestedModel, 'embedding')
-    if (explicit.matched) {
-      if (!explicit.provider) return gatewayError(explicit.status, explicit.message)
-      model = explicit.model
-      candidates = [explicit.provider]
-    } else {
-      candidates = await resolveRoute(db, requestedModel)
-    }
-  } catch {
-    return gatewayError(503, 'routing state unavailable', 'api_error')
-  }
-  if (candidates.length === 0) {
-    return gatewayError(404, `no provider for model ${requestedModel}`)
-  }
+  const route = await resolveRelayRoute(db, requestedModel, 'embedding')
+  if (route instanceof Response) return route
+  const { model, candidates } = route
 
   const base = { apiKeyId, model, clientIp }
   let attemptedProvider = false
-
-  const trackPermit = (permit: ConcurrencyPermit): void => {
-    if (!permit.finished) return
-    onDispose(event, () => permit.release())
-    event.waitUntil(permit.finished)
-  }
 
   const logLeaseLost = async (provider: RoutedProvider): Promise<Response> => {
     await insertLog(event, {
@@ -164,7 +91,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
       durationMs: Math.round(performance.now() - t0),
       error: sanitizeError('concurrency lease lost'),
     })
-    return gatewayError(503, 'concurrency state unavailable', 'api_error')
+    return concurrencyStateUnavailable()
   }
 
   for (const provider of candidates) {
@@ -172,23 +99,22 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
     try {
       // embedding 响应整体缓冲、无字节转发风险，满员时短暂排队等待空槽，
       // 超时仍未拿到租约才 continue 到下一候选（chat/responses 保持即取即走）
-      permit = await acquireQueuedConcurrency(db, {
-        providerId: provider.id,
-        model,
-        providerLimit: provider.max_concurrency,
-        routeLimit: provider.route_max_concurrency,
-      }, { signal: event.req.signal })
+      permit = await acquireQueuedConcurrency(
+        db,
+        {
+          providerId: provider.id,
+          model,
+          providerLimit: provider.max_concurrency,
+          routeLimit: provider.route_max_concurrency,
+        },
+        event.req.signal,
+      )
     } catch {
-      return gatewayError(503, 'concurrency state unavailable', 'api_error')
+      return concurrencyStateUnavailable()
     }
     if (!permit) continue
-    trackPermit(permit)
+    trackPermit(event, permit)
     attemptedProvider = true
-
-    if (permit.lost()) {
-      await permit.release()
-      return logLeaseLost(provider)
-    }
 
     // alias 映射（或 provider/model 显式选择）导致上游模型 id 与客户端请求不同时，重写 body 里的 model 字段
     const bodyForProvider =
@@ -196,13 +122,13 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
     let upstreamBody: BodyInit =
       provider.upstream_model !== requestedModel
         ? new TextEncoder().encode(JSON.stringify(bodyForProvider))
-        : originalRawBody
+        : rawBody
     if (provider.type === 'embedding' && provider.transform_code !== '') {
       try {
         const transformed = await evalTransform(provider.transform_code, bodyForProvider)
         upstreamBody = new TextEncoder().encode(JSON.stringify(transformed))
       } catch (error) {
-        const leaseLost = permit.lost()
+        const leaseLost = permit.signal.aborted
         await permit.release()
         if (leaseLost) return logLeaseLost(provider)
         const message = error instanceof Error ? error.message : String(error)
@@ -219,14 +145,12 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
       }
     }
 
-    if (permit.lost()) {
+    if (permit.signal.aborted) {
       await permit.release()
       return logLeaseLost(provider)
     }
 
-    const leaseSignal = permit.signal
-      ? AbortSignal.any([event.req.signal, permit.signal])
-      : event.req.signal
+    const leaseSignal = AbortSignal.any([event.req.signal, permit.signal])
     let res: Response | null = null
     let fetchError: string | null = null
     // TTFT 计时起点：从发起上游连接起算；此前的路由、并发排队、transform 等内部处理不计入
@@ -247,7 +171,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
     }
 
     if (!res) {
-      const leaseLost = permit.lost()
+      const leaseLost = permit.signal.aborted
       await permit.release()
       if (leaseLost) return logLeaseLost(provider)
       await insertLog(event, {
@@ -262,7 +186,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
       continue
     }
 
-    if (permit.lost()) {
+    if (permit.signal.aborted) {
       await cancelBody(res.body)
       await permit.release()
       return logLeaseLost(provider)
@@ -270,7 +194,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
 
     if (res.status >= 500) {
       const respBody = await readBodyText(res.body)
-      const leaseLost = permit.lost()
+      const leaseLost = permit.signal.aborted
       await permit.release()
       if (leaseLost) return logLeaseLost(provider)
       await insertLog(event, {
@@ -298,7 +222,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
       await permit.release()
     }
 
-    if (permit.lost()) return logLeaseLost(provider)
+    if (permit.signal.aborted) return logLeaseLost(provider)
     if (!responseBuffer) {
       await insertLog(event, {
         ...base,
@@ -323,11 +247,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
         durationMs: Math.round(performance.now() - t0),
         error: sanitizeError(`upstream ${res.status}`),
         reqBody: clientReqBody,
-        respBody: new TextDecoder().decode(
-          responseBuffer.byteLength > MAX_DETAIL_BODY
-            ? responseBuffer.slice(0, MAX_DETAIL_BODY)
-            : responseBuffer,
-        ),
+        respBody: detailText(responseBuffer),
       })
       return new Response(responseBuffer, {
         status: res.status,
@@ -360,11 +280,7 @@ export async function relayEmbeddings(event: H3Event): Promise<Response> {
           durationMs: Math.round(performance.now() - t0),
           error: sanitizeError(`${provider.name}: response transform failed: ${message}`),
           reqBody: clientReqBody,
-          respBody: new TextDecoder().decode(
-            responseBuffer.byteLength > MAX_DETAIL_BODY
-              ? responseBuffer.slice(0, MAX_DETAIL_BODY)
-              : responseBuffer,
-          ),
+          respBody: detailText(responseBuffer),
         })
         continue
       }

@@ -1,8 +1,8 @@
 import { H3 } from 'h3'
 import { adminMw, apiKeyMw } from './auth.ts'
 import { registerAdmin } from './admin/index.ts'
-import { registerLlm } from './llm/index.ts'
-import { registerMcp } from './mcp/index.ts'
+import { registerLlm } from './llm/routes.ts'
+import { registerMcp } from './mcp/routes.ts'
 
 /**
  * 运行时无关的 H3 应用组装。

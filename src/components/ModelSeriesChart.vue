@@ -4,7 +4,7 @@ import { connect, graphic, use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import { CanvasRenderer } from 'echarts/renderers'
 import VChart from 'vue-echarts'
-import { observeChartTheme, readChartTheme, withAlpha } from '@/lib/chartTheme'
+import { escapeHtml, readChartTheme, useChartTheme, withAlpha } from '@/lib/chartTheme'
 import { formatLocalTs, parseUtcTs, type LocalTsStyle } from '@/lib/time'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, AxisPointerComponent, LegendComponent])
@@ -21,22 +21,11 @@ const props = defineProps<{
   height?: number
 }>()
 
-const themeVersion = ref(0)
-let stopThemeObserver: (() => void) | null = null
+const { themeVersion } = useChartTheme()
 
 const hasData = computed(() => props.labels.length > 0 && props.series.length > 0)
 
 const formatValue = (value: number) => (props.format ?? ((v: number) => v.toLocaleString('en-US')))(value)
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char]!)
-}
 
 function spanSeconds(): number {
   if (props.labels.length < 2) return 0
@@ -48,7 +37,7 @@ function spanSeconds(): number {
 /** 跨天只显示日期，单日内只显示时刻（均为浏览器本地时区） */
 const labelStyle = computed<LocalTsStyle>(() => (spanSeconds() > 24 * 60 * 60 ? 'month-day' : 'hour-minute'))
 
-function tooltipFormatter(params: unknown): string {
+function tooltipFormatter(params: unknown, fallbackColor: string): string {
   const items = (Array.isArray(params) ? params : [params]).filter((item): item is Record<string, unknown> => {
     return Boolean(item && typeof item === 'object')
   })
@@ -63,7 +52,7 @@ function tooltipFormatter(params: unknown): string {
     .map((item) => ({
       name: String(item.seriesName ?? ''),
       value: typeof item.value === 'number' && Number.isFinite(item.value) ? item.value : 0,
-      color: lineColors.value.get(String(item.seriesName ?? '')) ?? readChartTheme().textDimmed,
+      color: lineColors.value.get(String(item.seriesName ?? '')) ?? fallbackColor,
     }))
     .filter((entry) => entry.value > 0)
     .sort((a, b) => b.value - a.value)
@@ -106,7 +95,7 @@ const chartOption = computed(() => {
       extraCssText: 'border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:180px',
       textStyle: { color: highlightedColor, fontSize: 12 },
       axisPointer: { type: 'line' as const, lineStyle: { color: textColor, width: 1, type: 'dashed' as const } },
-      formatter: tooltipFormatter,
+      formatter: (params: unknown) => tooltipFormatter(params, textColor),
     },
     legend: {
       show: true,
@@ -168,22 +157,11 @@ const chartOption = computed(() => {
   }
 })
 
-onMounted(() => {
-  stopThemeObserver = observeChartTheme(() => {
-    themeVersion.value += 1
-  })
-})
-
 watch(hasData, (value) => {
   const group = props.group
   if (!value || !group) return
   nextTick(() => connect(group))
 }, { immediate: true })
-
-onBeforeUnmount(() => {
-  stopThemeObserver?.()
-  stopThemeObserver = null
-})
 </script>
 
 <template>

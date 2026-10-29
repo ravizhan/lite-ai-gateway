@@ -6,6 +6,7 @@ import {
   capabilityDetail,
   exposedDefinitionText,
   exposedToolNames,
+  KIND_ICONS,
   loadO200kCounter,
   type McpPromptEditTarget,
 } from '../../lib/mcp-prompt'
@@ -14,11 +15,14 @@ import type { McpCapabilityKind, McpToolPromptsResult } from '../../../shared/ap
 interface Row {
   key: string
   kind: McpCapabilityKind
+  icon: string
   name: string
   detail: unknown
   defaultPrompt: string
   prompt: string
   overridden: boolean
+  /** 暴露定义文本的 token 数（计数器未就绪为 null） */
+  tokens: number | null
 }
 
 const { t } = useI18n()
@@ -35,12 +39,6 @@ const showEdit = computed({
   },
 })
 
-const KIND_ICONS: Record<McpCapabilityKind, string> = {
-  tool: 'i-lucide-wrench',
-  prompt: 'i-lucide-message-square-text',
-  resource: 'i-lucide-database',
-}
-
 async function load() {
   loading.value = true
   try {
@@ -55,8 +53,6 @@ onMounted(async () => {
   await load()
   // 首屏渲染后再加载 tokenizer chunk（独立 chunk，计数出现前表格已可见）
   counter.value = await loadO200kCounter()
-  // 编码字典加载期间后端可能已写入覆盖，重拉一次使计数与数据一致
-  await load()
 })
 
 const serverOptions = computed(() => [
@@ -70,50 +66,46 @@ const kindOptions = computed(() => [
   { label: t('mcpTools.kind_resource'), value: 'resource' },
 ])
 
-/** 展示范围 = 服务器筛选 + kind 筛选；token 总和与列表同口径 */
-const visibleServers = computed(() =>
-  servers.value
-    .filter((s) => serverFilter.value === null || String(s.server_id) === serverFilter.value)
-    .map((s) => ({
-      ...s,
-      rows: s.items
-        .filter((c) => kindFilter.value === null || c.kind === kindFilter.value)
-        .map<Row>((c) => ({
-          key: `${c.kind}:${c.name}`,
-          kind: c.kind,
-          name: c.name,
-          detail: c.detail,
-          defaultPrompt: c.default_prompt,
-          prompt: c.prompt,
-          overridden: c.overridden === 1,
-        })),
-    })),
-)
-
-const visibleTotal = computed(() => visibleServers.value.reduce((sum, s) => sum + s.rows.length, 0))
-
 /** 暴露范围（默认组 = 全部 enabled servers）内的工具名：token 统计与 hub 命名一致 */
 const toolNames = computed(() => exposedToolNames(servers.value))
 
-function exposedName(serverId: number, row: Row): string | undefined {
-  return row.kind === 'tool' ? toolNames.value.get(`${serverId}:${row.name}`) : undefined
+function exposedName(serverId: number, kind: McpCapabilityKind, name: string): string | undefined {
+  return kind === 'tool' ? toolNames.value.get(`${serverId}:${name}`) : undefined
 }
 
-function rowTokens(serverId: number, serverName: string, row: Row): number | null {
-  if (!counter.value) return null
-  return counter.value(exposedDefinitionText(serverName, row, row.prompt, row.overridden, exposedName(serverId, row)))
-}
+/** 展示范围 = 服务器筛选 + kind 筛选；token 计数与列表同口径 */
+const visibleServers = computed(() => {
+  const count = counter.value
+  return servers.value
+    .filter((s) => serverFilter.value === null || String(s.server_id) === serverFilter.value)
+    .map((s) => {
+      const rows = s.items
+        .filter((c) => kindFilter.value === null || c.kind === kindFilter.value)
+        .map<Row>((c) => {
+          const overridden = c.overridden === 1
+          return {
+            key: `${c.kind}:${c.name}`,
+            kind: c.kind,
+            icon: KIND_ICONS[c.kind],
+            name: c.name,
+            detail: c.detail,
+            defaultPrompt: c.default_prompt,
+            prompt: c.prompt,
+            overridden,
+            tokens: count
+              ? count(exposedDefinitionText(s.server_name, c, c.prompt, overridden, exposedName(s.server_id, c.kind, c.name)))
+              : null,
+          }
+        })
+      return {
+        ...s,
+        rows,
+        tokens: count ? rows.reduce((sum, row) => sum + (row.tokens ?? 0), 0) : null,
+      }
+    })
+})
 
-function serverTokens(server: (typeof visibleServers.value)[number]): number | null {
-  if (!counter.value) return null
-  let total = 0
-  for (const row of server.rows) {
-    total += counter.value(
-      exposedDefinitionText(server.server_name, row, row.prompt, row.overridden, exposedName(server.server_id, row)),
-    )
-  }
-  return total
-}
+const visibleTotal = computed(() => visibleServers.value.reduce((sum, s) => sum + s.rows.length, 0))
 
 function openEdit(server: (typeof visibleServers.value)[number], row: Row) {
   editing.value = {
@@ -121,7 +113,7 @@ function openEdit(server: (typeof visibleServers.value)[number], row: Row) {
     serverName: server.server_name,
     kind: row.kind,
     name: row.name,
-    exposedToolName: exposedName(server.server_id, row),
+    exposedToolName: exposedName(server.server_id, row.kind, row.name),
     detail: row.detail,
     defaultPrompt: row.defaultPrompt,
     prompt: row.prompt,
@@ -165,8 +157,8 @@ async function onSaved() {
             {{ server.enabled ? t('common.enabled') : t('common.disabled') }}
           </UBadge>
         </div>
-        <UBadge v-if="serverTokens(server) !== null" color="neutral" variant="subtle">
-          {{ t('mcpTools.tokensTotal', { count: serverTokens(server)!.toLocaleString() }) }}
+        <UBadge v-if="server.tokens !== null" color="neutral" variant="subtle">
+          {{ t('mcpTools.tokensTotal', { count: server.tokens!.toLocaleString() }) }}
         </UBadge>
       </div>
     </template>
@@ -176,7 +168,7 @@ async function onSaved() {
     <UAccordion
       v-else
       type="multiple"
-      :items="server.rows.map((row) => ({ value: row.key, icon: KIND_ICONS[row.kind], row }))"
+      :items="server.rows.map((row) => ({ value: row.key, icon: row.icon, row }))"
     >
       <template #leading="{ item }">
         <div class="flex min-w-0 flex-1 items-center gap-2 ps-2">
@@ -188,8 +180,8 @@ async function onSaved() {
       </template>
       <template #trailing="{ item }">
         <div class="flex shrink-0 items-center gap-1" @click.stop>
-          <span v-if="rowTokens(server.server_id, server.server_name, item.row) !== null" class="text-xs tabular-nums text-(--ui-text-muted)">
-            {{ t('mcpTools.tokens', { count: rowTokens(server.server_id, server.server_name, item.row)!.toLocaleString() }) }}
+          <span v-if="item.row.tokens !== null" class="text-xs tabular-nums text-(--ui-text-muted)">
+            {{ t('mcpTools.tokens', { count: item.row.tokens!.toLocaleString() }) }}
           </span>
           <UButton size="xs" variant="ghost" icon="i-lucide-pencil" :label="t('common.edit')" @click="openEdit(server, item.row)" />
         </div>

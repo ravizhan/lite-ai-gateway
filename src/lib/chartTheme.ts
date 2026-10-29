@@ -1,3 +1,5 @@
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+
 const SERIES_COLOR_VARS = [
   { light: '--color-blue-600', dark: '--color-blue-400' },
   { light: '--color-emerald-600', dark: '--color-emerald-400' },
@@ -27,7 +29,6 @@ interface Rgba {
 }
 
 function parseCssColor(value: string): Rgba | null {
-  if (typeof document === 'undefined') return null
   if (!colorContext) {
     const canvas = document.createElement('canvas')
     canvas.width = 1
@@ -49,7 +50,6 @@ function parseCssColor(value: string): Rgba | null {
 
 function readCssColors(): Record<string, string> {
   const values: Record<string, string> = {}
-  if (typeof document === 'undefined') return values
   const styles = getComputedStyle(document.documentElement)
   for (const name of COLOR_VARIABLES) values[name] = styles.getPropertyValue(name).trim()
   return values
@@ -66,7 +66,7 @@ function readCssColor(values: Record<string, string>, ...names: string[]): strin
   return ''
 }
 
-export interface ChartTheme {
+interface ChartTheme {
   palette: string[]
   text: string
   textDimmed: string
@@ -76,7 +76,7 @@ export interface ChartTheme {
 
 export function readChartTheme(): ChartTheme {
   const values = readCssColors()
-  const dark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  const dark = document.documentElement.classList.contains('dark')
   const text = readCssColor(values, '--ui-text-highlighted', '--ui-text')
   const textDimmed = readCssColor(values, '--ui-text-dimmed', '--ui-text-muted') || text
   const border = readCssColor(values, '--ui-border-muted', '--ui-border') || textDimmed
@@ -97,9 +97,34 @@ export function withAlpha(color: string, alpha: number): string {
   return `rgba(${parsed.r}, ${parsed.g}, ${parsed.b}, ${a})`
 }
 
-export function observeChartTheme(onChange: () => void): () => void {
-  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return () => {}
-  const observer = new MutationObserver(onChange)
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
-  return () => observer.disconnect()
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}
+
+/** 转义 echarts tooltip 里的 HTML 文本 */
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => HTML_ESCAPES[char]!)
+}
+
+/** 图表主题版本：根节点 light/dark class 变化时自增，供 option computed 依赖重建 */
+export function useChartTheme() {
+  const themeVersion = ref(0)
+  let observer: MutationObserver | null = null
+
+  onMounted(() => {
+    observer = new MutationObserver(() => {
+      themeVersion.value += 1
+    })
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+  })
+  onBeforeUnmount(() => {
+    observer?.disconnect()
+    observer = null
+  })
+
+  return { themeVersion }
 }

@@ -2,6 +2,13 @@
 import type { McpCapabilityKind, McpToolPromptsResult } from '../../shared/api'
 import { assignExposedToolNames } from '../../shared/mcp-naming'
 
+/** 能力类型图标（工具列表与分组选择器共用） */
+export const KIND_ICONS: Record<McpCapabilityKind, string> = {
+  tool: 'i-lucide-wrench',
+  prompt: 'i-lucide-message-square-text',
+  resource: 'i-lucide-database',
+}
+
 /** 编辑目标（工具列表页 → 编辑弹窗的视图模型） */
 export interface McpPromptEditTarget {
   serverId: number

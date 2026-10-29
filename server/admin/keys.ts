@@ -1,9 +1,10 @@
-import type { H3, H3Event } from 'h3'
-import { HTTPError, getRouterParam, readBody } from 'h3'
+import type { H3 } from 'h3'
+import { HTTPError, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
 import { generateApiKey } from '../lib/keys.ts'
+import { mustGet, parseBody, routeId } from './common.ts'
 import type { ApiKeyRow } from '../../shared/api.ts'
 
 const keySchema = z.object({
@@ -14,22 +15,6 @@ const keyPatchSchema = z.object({
   name: z.string().min(1).optional(),
   enabled: z.union([z.literal(0), z.literal(1)]).optional(),
 })
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
-
-/** 路由参数 id 解析（非法 → 400） */
-function routeId(event: H3Event): number {
-  const id = Number(getRouterParam(event, 'id'))
-  if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
-  return id
-}
 
 export function registerKeys(app: H3): void {
   // 全部 API key
@@ -46,9 +31,7 @@ export function registerKeys(app: H3): void {
     const key = generateApiKey()
     await db.run(`INSERT INTO api_keys (name, key) VALUES (?, ?)`, body.name, key)
     // key 唯一，回查拿完整行（含 created_at）
-    const row = await db.get<ApiKeyRow>(`SELECT * FROM api_keys WHERE key = ?`, key)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
-    return row
+    return mustGet<ApiKeyRow>(db, `SELECT * FROM api_keys WHERE key = ?`, key)
   })
 
   // 更新 key（改名 / 启停用）
@@ -72,9 +55,7 @@ export function registerKeys(app: H3): void {
     if (sets.length > 0) {
       await db.run(`UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`, ...params, id)
     }
-    const row = await db.get<ApiKeyRow>(`SELECT * FROM api_keys WHERE id = ?`, id)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
-    return row
+    return mustGet<ApiKeyRow>(db, `SELECT * FROM api_keys WHERE id = ?`, id)
   })
 
   // 删除 key（即时吊销）

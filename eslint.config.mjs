@@ -9,24 +9,6 @@ export default [
   ...tseslint.configs.recommended,
   ...vue.configs['flat/recommended'],
   {
-    // 浏览器全局（src/ 前端代码）
-    files: ['src/**/*.{ts,vue}'],
-    languageOptions: {
-      globals: {
-        window: 'readonly',
-        navigator: 'readonly',
-        localStorage: 'readonly',
-        location: 'readonly',
-        fetch: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
-        URL: 'readonly',
-        URLSearchParams: 'readonly',
-        Event: 'readonly',
-      },
-    },
-  },
-  {
     files: ['**/*.vue'],
     languageOptions: { parserOptions: { parser: tseslint.parser } },
   },

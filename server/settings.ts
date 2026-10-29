@@ -3,7 +3,7 @@ import { DEFAULT_GATEWAY_SETTINGS, type GatewaySettings } from '../shared/api.ts
 import type { Db } from './db/types.ts'
 
 /** Single row used for all gateway configuration in the existing settings table. */
-export const GATEWAY_SETTINGS_KEY = 'gateway'
+const GATEWAY_SETTINGS_KEY = 'gateway'
 
 const MAX_TTL_SECONDS = 31_536_000
 const HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/
@@ -29,13 +29,13 @@ const derivedSourceSchema = z.object({
   key: z.literal(''),
 }).strict()
 
-export const affinityKeySourceSchema = z.discriminatedUnion('type', [
+const affinityKeySourceSchema = z.discriminatedUnion('type', [
   headerSourceSchema,
   bodySourceSchema,
   derivedSourceSchema,
 ])
 
-export const affinityRuleSchema = z
+const affinityRuleSchema = z
   .object({
     name: z.string().trim().min(1).max(128),
     enabled: z.boolean(),
@@ -48,7 +48,7 @@ export const affinityRuleSchema = z
   })
   .strict()
 
-export const affinitySettingsSchema = z
+const affinitySettingsSchema = z
   .object({
     enabled: z.boolean(),
     ttlSeconds: z.number().int().min(0).max(MAX_TTL_SECONDS),
@@ -99,44 +99,49 @@ export const gatewaySettingsSchema = z
   .object({ affinity: affinitySettingsSchema })
   .strict()
 
-function cloneSettings(settings: GatewaySettings): GatewaySettings {
-  return JSON.parse(JSON.stringify(settings)) as GatewaySettings
+/** 默认设置只读共享（写入方是唯一校验点）：调用方只读，禁止修改。 */
+const DEFAULT_SETTINGS: GatewaySettings = deepFreeze(DEFAULT_GATEWAY_SETTINGS)
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child)
+    Object.freeze(value)
+  }
+  return value
 }
 
-/** Load persisted settings; an absent row intentionally resolves to the legacy defaults. */
+/**
+ * Load persisted settings; an absent row intentionally resolves to the legacy defaults.
+ * 唯一的写入路径（saveGatewaySettings）已用完整 schema 校验，故读取只做 JSON.parse，
+ * 避免每个 LLM 请求都跑一遍 schema（含正则编译）。
+ */
 export async function loadGatewaySettings(db: Db): Promise<GatewaySettings> {
   const row = await db.get<{ value: string }>(
     'SELECT value FROM settings WHERE key = ?',
     GATEWAY_SETTINGS_KEY,
   )
-  if (!row) return cloneSettings(DEFAULT_GATEWAY_SETTINGS)
+  if (!row) return DEFAULT_SETTINGS
 
-  let value: unknown
   try {
-    value = JSON.parse(row.value)
+    return JSON.parse(row.value) as GatewaySettings
   } catch {
     throw new Error('invalid persisted gateway settings')
   }
-  const parsed = gatewaySettingsSchema.safeParse(value)
-  if (!parsed.success) throw new Error('invalid persisted gateway settings')
-  return parsed.data as GatewaySettings
 }
 
 /**
  * Persist the complete settings document and invalidate every existing sticky binding.
  * Clearing the binding table prevents a changed rule/TTL from reusing an old winner.
+ * 调用方（admin PUT）已用 gatewaySettingsSchema 校验，此处不再重复校验。
  */
 export async function saveGatewaySettings(db: Db, settings: GatewaySettings): Promise<GatewaySettings> {
-  const parsed = gatewaySettingsSchema.safeParse(settings)
-  if (!parsed.success) throw new Error('invalid gateway settings')
-  const normalized = parsed.data as GatewaySettings
   await db.run(
     `INSERT INTO settings (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     GATEWAY_SETTINGS_KEY,
-    JSON.stringify(normalized),
+    JSON.stringify(settings),
   )
   await db.run('DELETE FROM llm_session_affinity')
-  return normalized
+  return settings
 }
 

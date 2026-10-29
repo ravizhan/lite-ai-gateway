@@ -52,7 +52,4 @@ export default defineConfig({
       '/messages': 'http://localhost:8788',
     },
   },
-  build: {
-    outDir: 'dist',
-  },
 })

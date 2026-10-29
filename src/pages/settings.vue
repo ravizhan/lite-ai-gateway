@@ -247,7 +247,7 @@ onMounted(loadSettings)
               v-model:rule="draft.affinity.rules[index]"
               :index="index"
               :total="draft.affinity.rules.length"
-              :disabled="saving"
+              :draggable-disabled="saving"
               @remove="removeRule(index)"
               @move="moveRule(index, $event)"
             />

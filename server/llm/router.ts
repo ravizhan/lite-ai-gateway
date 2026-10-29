@@ -124,7 +124,7 @@ export async function resolveRoute(db: Db, model: string): Promise<RoutedProvide
     `SELECT COUNT(*) AS c FROM model_routes WHERE model = ?`,
     model,
   )
-  if ((configured?.c ?? 0) > 0) return []
+  if (configured?.c) return []
   return db.all<RoutedProvider>(
     `SELECT p.*, 0 AS route_max_concurrency,
             m.model AS upstream_model

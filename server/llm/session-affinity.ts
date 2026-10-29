@@ -1,6 +1,5 @@
 import type { Db } from '../db/types.ts'
 import {
-  DEFAULT_AFFINITY_SETTINGS,
   type AffinityKeySource,
   type AffinityRule,
   type AffinitySettings,
@@ -184,8 +183,8 @@ export async function extractAffinityKey(
   model: string,
   headers: Headers,
   body: Record<string, unknown>,
-  settings: AffinitySettings = DEFAULT_AFFINITY_SETTINGS,
-  path = protocol === 'chat' ? '/v1/chat/completions' : '/v1/responses',
+  settings: AffinitySettings,
+  path: string,
 ): Promise<AffinityKey | null> {
   if (!settings.enabled) return null
 

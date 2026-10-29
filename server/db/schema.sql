@@ -115,7 +115,6 @@ CREATE TABLE IF NOT EXISTS llm_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_logs_ts ON llm_logs(ts);
-CREATE INDEX IF NOT EXISTS idx_llm_logs_model ON llm_logs(model);
 
 -- 首次配置价格（prices INSERT，含 upsert 的插入分支）时，回填此前因无价格而挂起的日志。
 -- 只处理 cost_pending = 1 的 chat/responses 行：已冻结的历史行（含 0 价、embedding）不动；
@@ -158,8 +157,6 @@ CREATE TABLE IF NOT EXISTS mcp_groups (
   description TEXT NOT NULL DEFAULT ''
 );
 
--- MCP 能力快照：server 启用时发现并持久化；detail 为能力完整 JSON（tool/prompt 原样，
--- resource 的 name = uri）。server 禁用后保留快照，重新启用时全量替换。
 -- MCP 能力快照：server 创建时发现并持久化（无论 enabled）；detail 为能力完整 JSON
 -- （tool/prompt 原样，resource 的 name = uri）。禁用后保留快照，重新启用时全量替换。
 CREATE TABLE IF NOT EXISTS mcp_capabilities (
@@ -235,5 +232,3 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
--- MCP 能力快照：server 创建时发现并持久化（无论 enabled）；detail 为能力完整 JSON
--- （tool/prompt 原样，resource 的 name = uri）。禁用后保留快照，重新启用时全量替换。

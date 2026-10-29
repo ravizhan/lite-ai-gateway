@@ -14,7 +14,7 @@ export async function ensureSchema(db: Db): Promise<boolean> {
   const row = await db.get<{ n: number }>(
     "SELECT count(*) AS n FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'",
   )
-  if ((row?.n ?? 0) > 0) return false
+  if (row?.n) return false
   const sql = await readFile(schemaPath, 'utf8')
   await db.exec(sql)
   return true

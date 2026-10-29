@@ -1,15 +1,8 @@
 /** 轻量 fetch 封装：自动带 Bearer、同源 baseURL、401 清 token 跳登录、错误 toast */
 import { useAuthStore } from '../stores/auth'
 
-export class ApiError extends Error {
-  status: number
-  data: unknown
-  constructor(status: number, message: string, data?: unknown) {
-    super(message)
-    this.status = status
-    this.data = data
-  }
-}
+/** 接口请求失败；调用方统一按 Error.message 展示 */
+class ApiError extends Error {}
 
 export async function api<T = unknown>(path: string, options: {
   method?: string
@@ -33,7 +26,7 @@ export async function api<T = unknown>(path: string, options: {
     auth.logout()
     // 避免在登录页重复跳转
     if (window.location.pathname !== '/login') window.location.href = '/login'
-    throw new ApiError(401, 'unauthorized')
+    throw new ApiError('unauthorized')
   }
   const text = await res.text()
   let data: unknown
@@ -42,7 +35,7 @@ export async function api<T = unknown>(path: string, options: {
     const msg = (data as { error?: { message?: string }; message?: string })?.error?.message
       ?? (data as { message?: string })?.message
       ?? `HTTP ${res.status}`
-    throw new ApiError(res.status, msg, data)
+    throw new ApiError(msg)
   }
   return data as T
 }

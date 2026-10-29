@@ -4,7 +4,8 @@ import { VueDraggable } from 'vue-draggable-plus'
 import type { AffinityKeySource, AffinityKeySourceType } from '../../shared/api'
 
 const sources = defineModel<AffinityKeySource[]>({ required: true })
-const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false })
+/** draggableDisabled 仅用于保存期间禁用拖拽（原生控件由外层 fieldset 统一禁用） */
+const props = withDefaults(defineProps<{ draggableDisabled?: boolean }>(), { draggableDisabled: false })
 const { t } = useI18n()
 
 const sourceTypeOptions = computed(() => [
@@ -62,7 +63,7 @@ function onNewSourceTypeChange() {
       v-model="sources"
       handle=".source-drag-handle"
       :animation="150"
-      :disabled="props.disabled"
+      :disabled="props.draggableDisabled"
       class="flex flex-col gap-3"
     >
       <div
@@ -84,7 +85,6 @@ function onNewSourceTypeChange() {
             v-model="source.type"
             :items="sourceTypeOptions"
             class="w-full"
-            :disabled="props.disabled"
             @update:model-value="onTypeChange(source)"
           />
         </UFormField>
@@ -98,7 +98,6 @@ function onNewSourceTypeChange() {
             v-model="source.key"
             class="w-full font-mono text-sm"
             :placeholder="t('settings.rules.rule.sourceKeyPlaceholder')"
-            :disabled="props.disabled"
           />
         </UFormField>
         <div v-else class="w-full pb-1 text-sm text-(--ui-text-muted) lg:min-w-0 lg:flex-[2]">
@@ -110,7 +109,7 @@ function onNewSourceTypeChange() {
             size="xs"
             color="neutral"
             variant="ghost"
-            :disabled="props.disabled || index === 0"
+            :disabled="index === 0"
             :label="t('settings.rules.rule.moveUp')"
             @click="moveSource(index, 'up')"
           />
@@ -118,7 +117,7 @@ function onNewSourceTypeChange() {
             size="xs"
             color="neutral"
             variant="ghost"
-            :disabled="props.disabled || index === sources.length - 1"
+            :disabled="index === sources.length - 1"
             :label="t('settings.rules.rule.moveDown')"
             @click="moveSource(index, 'down')"
           />
@@ -127,7 +126,6 @@ function onNewSourceTypeChange() {
             color="error"
             variant="ghost"
             :label="t('settings.rules.rule.removeSource')"
-            :disabled="props.disabled"
             @click="removeSource(index)"
           />
         </div>
@@ -144,7 +142,6 @@ function onNewSourceTypeChange() {
           v-model="newSourceType"
           :items="sourceTypeOptions"
           class="w-full"
-          :disabled="props.disabled"
           @update:model-value="onNewSourceTypeChange"
         />
       </UFormField>
@@ -153,14 +150,14 @@ function onNewSourceTypeChange() {
         :label="t('settings.rules.rule.sourceKey')"
         class="w-full lg:min-w-0 lg:flex-1"
       >
-        <UInput v-model="newSourceKey" class="w-full font-mono text-sm" :placeholder="t('settings.rules.rule.sourceKeyPlaceholder')" :disabled="props.disabled" />
+        <UInput v-model="newSourceKey" class="w-full font-mono text-sm" :placeholder="t('settings.rules.rule.sourceKeyPlaceholder')" />
       </UFormField>
       <UButton
         icon="i-lucide-plus"
         color="neutral"
         variant="outline"
         :label="t('settings.rules.rule.addSource')"
-        :disabled="props.disabled || (newSourceType !== 'derived' && !newSourceKey.trim())"
+        :disabled="newSourceType !== 'derived' && !newSourceKey.trim()"
         @click="addSource"
       />
     </div>

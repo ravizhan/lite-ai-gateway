@@ -15,9 +15,9 @@ export function setNodeDb(db: Db): void {
 }
 
 /** 运行时差异唯一点：Workers 用 D1，Node 用注入的 node:sqlite */
-export function getDb(event?: H3Event): Db {
-  const cf = event?.runtime?.cloudflare
-  if (cf && event) {
+export function getDb(event: H3Event): Db {
+  const cf = event.runtime?.cloudflare
+  if (cf) {
     const cached = d1DbByRequest.get(event)
     if (cached) return cached
 

@@ -115,12 +115,32 @@ function parseChatTail(tail: Uint8Array): { usageRaw: unknown | null; error: str
   return { usageRaw: null, error: sawParseError ? 'SSE usage parse failed' : null }
 }
 
+/** 协议专属观察器：write 逐 chunk 收集，end 在流结束后一次性给出用量 */
+interface UsageSink {
+  write(chunk: Uint8Array): void
+  end(): { usageRaw: unknown | null; error: string | null }
+}
+
+function createUsageSink(protocol: 'chat' | 'responses'): UsageSink {
+  if (protocol === 'chat') {
+    const tail = new TailRing()
+    return {
+      write: (chunk) => tail.append(chunk),
+      end: () => parseChatTail(tail.view()),
+    }
+  }
+  const observer = createResponsesUsageObserver()
+  return {
+    write: (chunk) => observer.write(chunk),
+    end: () => observer.end(),
+  }
+}
+
 export function createSseTap(
   protocol: 'chat' | 'responses',
   source: ReadableStream<Uint8Array>,
 ): SseTapResult {
-  const chatTail = protocol === 'chat' ? new TailRing() : null
-  const observer = protocol === 'responses' ? createResponsesUsageObserver() : null
+  const sink = createUsageSink(protocol)
   let firstChunkMs: number | null = null
   let settled = false
   let resolveFinish!: (r: { usageRaw: unknown | null; error: string | null }) => void
@@ -139,14 +159,12 @@ export function createSseTap(
       if (firstChunkMs === null) firstChunkMs = performance.now() // TTFT
       controller.enqueue(chunk) // 字节透传，零改写
       // 观察在 enqueue 之后：解析问题绝不阻塞或破坏转发
-      if (chatTail !== null) chatTail.append(chunk) // 定长尾缓冲：只拷入参字节，超容量覆盖旧字节
-      else if (observer !== null) observer.write(chunk) // 增量切帧 + JSON 扫描，只保留 usage
+      sink.write(chunk)
     },
     flush() {
       // 正常结束（source 关闭）：chat 解析尾缓冲；responses 冲刷解码器与最后一帧
       try {
-        if (chatTail !== null) settle(parseChatTail(chatTail.view()))
-        else if (observer !== null) settle(observer.end())
+        settle(sink.end())
       } catch (err) {
         settle({ usageRaw: null, error: err instanceof Error ? err.message : String(err) })
       }

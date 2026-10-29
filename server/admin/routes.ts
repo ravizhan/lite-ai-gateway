@@ -1,8 +1,9 @@
 import type { H3 } from 'h3'
-import { HTTPError, readBody } from 'h3'
+import { readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
+import { parseBody } from './common.ts'
 import type { ModelRouteRow } from '../../shared/api.ts'
 
 /** 按模型配置供应商优先级（priority 1 最高） */
@@ -17,15 +18,6 @@ const routeSchema = z.object({
     }),
   ),
 })
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
 
 export function registerRoutes(app: H3): void {
   // 全部路由，JOIN 供应商名

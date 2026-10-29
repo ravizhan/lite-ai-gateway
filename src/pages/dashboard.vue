@@ -2,7 +2,7 @@
 import { api } from '@/lib/api'
 import type { StatsResult } from '../../shared/api'
 import { useI18n } from 'vue-i18n'
-import { observeChartTheme, readChartTheme } from '@/lib/chartTheme'
+import { readChartTheme, useChartTheme } from '@/lib/chartTheme'
 
 const { t } = useI18n()
 
@@ -25,8 +25,7 @@ const loadedWindow = ref<{ fromMs: number; toMs: number; bucket: number } | null
 const loading = ref(false)
 const error = ref(false)
 const loadedRange = ref<number | null>(null)
-const themeVersion = ref(0)
-let stopThemeObserver: (() => void) | null = null
+const { themeVersion } = useChartTheme()
 
 const staleStats = computed(() => stats.value != null && loadedRange.value !== range.value)
 
@@ -52,16 +51,7 @@ async function load() {
 }
 
 watch(range, load)
-onMounted(() => {
-  load()
-  stopThemeObserver = observeChartTheme(() => {
-    themeVersion.value += 1
-  })
-})
-onBeforeUnmount(() => {
-  stopThemeObserver?.()
-  stopThemeObserver = null
-})
+onMounted(load)
 
 const totals = computed(() => stats.value?.totals)
 

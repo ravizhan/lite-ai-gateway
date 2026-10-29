@@ -3,6 +3,7 @@ import { HTTPError, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
+import { mustGet, parseBody } from './common.ts'
 import type { PriceRow } from '../../shared/api.ts'
 
 /** 价格按"网关模型名 + 供应商"配置，单位：美元 / 1M tokens */
@@ -13,15 +14,6 @@ const priceSchema = z.object({
   output_price: z.number().finite().min(0),
   cache_read_price: z.number().finite().min(0),
 })
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
 
 export function registerPrices(app: H3): void {
   // 全部价格行
@@ -50,12 +42,11 @@ export function registerPrices(app: H3): void {
       body.output_price,
       body.cache_read_price,
     )
-    const row = await db.get<PriceRow>(
+    return mustGet<PriceRow>(
+      db,
       `SELECT * FROM prices WHERE model = ? AND provider_id = ?`,
       body.model,
       body.provider_id,
     )
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read upserted row' })
-    return row
   })
 }

@@ -9,16 +9,12 @@ import type {
   McpServerCapabilities,
 } from '../../../shared/api'
 import { useI18n } from 'vue-i18n'
+import { KIND_ICONS } from '../../lib/mcp-prompt'
 
 const toast = useToast()
 const { t } = useI18n()
 
 const KINDS: McpCapabilityKind[] = ['tool', 'prompt', 'resource']
-const KIND_ICONS: Record<McpCapabilityKind, string> = {
-  tool: 'i-lucide-wrench',
-  prompt: 'i-lucide-message-square-text',
-  resource: 'i-lucide-database',
-}
 
 const groups = ref<McpGroupWithCapabilities[]>([])
 const capabilityServers = ref<McpServerCapabilities[]>([])
@@ -39,7 +35,13 @@ const showDelete = computed({
 
 const form = reactive({ name: '', description: '', selected: new Set<string>(), webSearch: false })
 const nameError = ref('')
-const expandedServers = ref<string[]>([])
+const expandedServers = ref<number[]>([])
+
+function toggleExpanded(serverId: number) {
+  expandedServers.value = expandedServers.value.includes(serverId)
+    ? expandedServers.value.filter((id) => id !== serverId)
+    : [...expandedServers.value, serverId]
+}
 
 const selected = computed(() => groups.value.find((g) => g.id === selectedId.value) ?? null)
 
@@ -285,19 +287,19 @@ async function saveGroup() {
                 <button
                   type="button"
                   class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
-                  @click="expandedServers = expandedServers.includes(String(server.server_id)) ? expandedServers.filter((x) => x !== String(server.server_id)) : [...expandedServers, String(server.server_id)]"
+                  @click="toggleExpanded(server.server_id)"
                 >
                   <span class="truncate text-sm font-medium text-(--ui-text-highlighted)">{{ server.server_name }}</span>
                   <UBadge color="neutral" variant="subtle" size="sm">{{ serverSelectedCount(server) }}/{{ server.counts.total }}</UBadge>
                   <UIcon
                     name="i-lucide-chevron-down"
                     class="ml-auto size-4 shrink-0 text-(--ui-text-muted) transition-transform"
-                    :class="{ 'rotate-180': expandedServers.includes(String(server.server_id)) }"
+                    :class="{ 'rotate-180': expandedServers.includes(server.server_id) }"
                   />
                 </button>
               </div>
 
-              <div v-if="expandedServers.includes(String(server.server_id))" class="flex flex-col gap-3 border-t border-(--ui-border) px-3 py-3">
+              <div v-if="expandedServers.includes(server.server_id)" class="flex flex-col gap-3 border-t border-(--ui-border) px-3 py-3">
                 <div v-for="kind in serverKinds(server)" :key="kind" class="flex flex-col gap-1.5">
                   <div class="flex items-center gap-2">
                     <UCheckbox

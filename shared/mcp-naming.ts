@@ -73,13 +73,6 @@ export function assignExposedToolNames(
     if (!renamed) return names
   }
 
-  // 兜底（正常输入 1–2 轮即收敛，这里实际不可达）：按同一优先级追加序号保证全局唯一
-  const used = new Set(reservedNames)
-  for (const i of [...order].sort((a, b) => rank(a) - rank(b) || a - b)) {
-    let name = names[i]
-    for (let n = 0; used.has(name); n++) name = `${names[i]}__${n}`
-    used.add(name)
-    names[i] = name
-  }
-  return names
+  // 正常输入 1–2 轮即收敛；轮次耗尽说明分配逻辑失效——直接抛错，不静默改名
+  throw new Error(`failed to assign unique tool names: ${names.join(', ')}`)
 }

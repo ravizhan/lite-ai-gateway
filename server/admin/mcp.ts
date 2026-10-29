@@ -1,5 +1,5 @@
-import type { H3, H3Event } from 'h3'
-import { HTTPError, getQuery, getRouterParam, readBody } from 'h3'
+import type { H3 } from 'h3'
+import { HTTPError, getQuery, readBody } from 'h3'
 import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
@@ -7,6 +7,7 @@ import type { Db } from '../db/types.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { clearUpstreamCache, discoverCapabilities, testServer } from '../mcp/upstream.ts'
 import type { DiscoveredCapability } from '../mcp/upstream.ts'
+import { mustGet, pagingParams, parseBody, routeId } from './common.ts'
 import type {
   McpCapabilitiesResult,
   McpCapabilityCounts,
@@ -19,7 +20,6 @@ import type {
   McpServerRow,
   McpServerWithCounts,
   McpServerType,
-  McpTestResult,
   McpToolPromptsResult,
   Paged,
 } from '../../shared/api.ts'
@@ -63,22 +63,6 @@ const promptOverrideSchema = z.object({
   prompt: z.string(),
 })
 const promptOverrideDeleteSchema = promptOverrideSchema.omit({ prompt: true })
-
-/** zod 校验失败 → 400 + issues */
-function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body)
-  if (!parsed.success) {
-    throw new HTTPError({ status: 400, message: 'invalid body', data: parsed.error.issues })
-  }
-  return parsed.data
-}
-
-/** 路由参数 id 解析（非法 → 400） */
-function routeId(event: H3Event): number {
-  const id = Number(getRouterParam(event, 'id'))
-  if (!Number.isInteger(id) || id <= 0) throw new HTTPError({ status: 400, message: 'invalid id' })
-  return id
-}
 
 /** args/env/headers 以 JSON 文本存储，提供时必须是合法 JSON */
 function requireJsonField(name: string, value: string | null | undefined): void {
@@ -127,13 +111,27 @@ function countCapabilities(caps: McpCapabilitySnapshot[]): McpCapabilityCounts {
 }
 
 /** 从快照 detail JSON 提取默认 prompt（description 字段；缺失/非法 → ''） */
-function defaultPromptOf(detail: unknown): string {
+function defaultPromptOf(detail: string): string {
   try {
-    const parsed = typeof detail === 'string' ? (JSON.parse(detail) as { description?: unknown }) : (detail as { description?: unknown })
+    const parsed = JSON.parse(detail) as { description?: unknown } | null
     return typeof parsed?.description === 'string' ? parsed.description : ''
   } catch {
     return ''
   }
+}
+
+/** 全部 server 的能力快照，按 server_id 分组（/capabilities 与 /tools 共用） */
+async function loadCapabilitiesByServer(db: Db): Promise<Map<number, McpCapabilitySnapshot[]>> {
+  const rows = await db.all<McpCapabilitySnapshot>(
+    `SELECT server_id, kind, name, detail FROM mcp_capabilities ORDER BY server_id, kind, name`,
+  )
+  const byServer = new Map<number, McpCapabilitySnapshot[]>()
+  for (const r of rows) {
+    const list = byServer.get(r.server_id)
+    if (list) list.push(r)
+    else byServer.set(r.server_id, [r])
+  }
+  return byServer
 }
 
 /**
@@ -183,17 +181,19 @@ export function registerMcp(app: H3): void {
     // 创建即发现（无论 enabled）：任一 list 失败（MethodNotFound 之外）→ 不落库
     let discovered: DiscoveredCapability[]
     try {
-      discovered = await discoverCapabilities({
-        id: 0,
-        name: body.name,
-        type: body.type,
-        command: body.command ?? null,
-        args: body.args ?? null,
-        env: body.env ?? null,
-        url: body.url ?? null,
-        headers: body.headers ?? null,
-        enabled,
-      })
+      discovered = await discoverCapabilities(
+        {
+          name: body.name,
+          type: body.type,
+          command: body.command ?? null,
+          args: body.args ?? null,
+          env: body.env ?? null,
+          url: body.url ?? null,
+          headers: body.headers ?? null,
+          enabled,
+        },
+        event.runtime?.name === 'node',
+      )
     } catch (error) {
       throw discoveryError(error)
     }
@@ -210,8 +210,7 @@ export function registerMcp(app: H3): void {
       enabled,
     )
     // name 唯一，回查拿完整行
-    const row = await db.get<McpServerRow>(`SELECT * FROM mcp_servers WHERE name = ?`, body.name)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
+    const row = await mustGet<McpServerRow>(db, `SELECT * FROM mcp_servers WHERE name = ?`, body.name)
     await replaceCapabilities(db, row.id, discovered)
     return row
   })
@@ -240,7 +239,7 @@ export function registerMcp(app: H3): void {
     let discovered: DiscoveredCapability[] | null = null
     if (existing.enabled === 0 && effective.enabled === 1) {
       try {
-        discovered = await discoverCapabilities(effective)
+        discovered = await discoverCapabilities(effective, event.runtime?.name === 'node')
       } catch (error) {
         throw discoveryError(error)
       }
@@ -282,8 +281,7 @@ export function registerMcp(app: H3): void {
     if (sets.length > 0) {
       await db.run(`UPDATE mcp_servers SET ${sets.join(', ')} WHERE id = ?`, ...params, id)
     }
-    const row = await db.get<McpServerRow>(`SELECT * FROM mcp_servers WHERE id = ?`, id)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
+    const row = await mustGet<McpServerRow>(db, `SELECT * FROM mcp_servers WHERE id = ?`, id)
     if (discovered !== null) await replaceCapabilities(db, row.id, discovered)
     return row
   })
@@ -303,8 +301,7 @@ export function registerMcp(app: H3): void {
     const db = getDb(event)
     const server = await db.get<McpServerRow>(`SELECT * FROM mcp_servers WHERE id = ?`, id)
     if (!server) throw new HTTPError({ status: 404, message: 'mcp server not found' })
-    const result: McpTestResult = await testServer(server)
-    return result
+    return testServer(server, event.runtime?.name === 'node')
   })
 
   // 全部 server 的能力快照（分组选择 UI 用）：每 server 明细 + 计数
@@ -312,15 +309,7 @@ export function registerMcp(app: H3): void {
     requireAdmin(event)
     const db = getDb(event)
     const servers = await db.all<{ id: number; name: string }>(`SELECT id, name FROM mcp_servers ORDER BY id`)
-    const rows = await db.all<McpCapabilitySnapshot>(
-      `SELECT server_id, kind, name, detail FROM mcp_capabilities ORDER BY server_id, kind, name`,
-    )
-    const byServer = new Map<number, McpCapabilitySnapshot[]>()
-    for (const r of rows) {
-      const list = byServer.get(r.server_id)
-      if (list) list.push(r)
-      else byServer.set(r.server_id, [r])
-    }
+    const byServer = await loadCapabilitiesByServer(db)
     const result: McpCapabilitiesResult = {
       servers: servers.map((s) => {
         const capabilities = byServer.get(s.id) ?? []
@@ -330,20 +319,6 @@ export function registerMcp(app: H3): void {
     return result
   })
 
-  // 单 server 能力快照明细 + 计数
-  app.get('/api/admin/mcp/servers/:id/capabilities', async (event) => {
-    requireAdmin(event)
-    const id = routeId(event)
-    const db = getDb(event)
-    const server = await db.get<{ id: number; name: string }>(`SELECT id, name FROM mcp_servers WHERE id = ?`, id)
-    if (!server) throw new HTTPError({ status: 404, message: 'mcp server not found' })
-    const capabilities = await db.all<McpCapabilitySnapshot>(
-      `SELECT server_id, kind, name, detail FROM mcp_capabilities WHERE server_id = ? ORDER BY kind, name`,
-      id,
-    )
-    return { server_id: server.id, server_name: server.name, capabilities, counts: countCapabilities(capabilities) }
-  })
-
   // ---------- MCP 工具 prompt ----------
 
   // 全部 server 的能力 + prompt 覆盖（工具列表页）：生效 prompt = 覆盖 ?? 快照 description
@@ -351,17 +326,9 @@ export function registerMcp(app: H3): void {
     requireAdmin(event)
     const db = getDb(event)
     const servers = await db.all<McpServerRow>(`SELECT * FROM mcp_servers ORDER BY id`)
-    const caps = await db.all<McpCapabilitySnapshot>(
-      `SELECT server_id, kind, name, detail FROM mcp_capabilities ORDER BY server_id, kind, name`,
-    )
+    const byServer = await loadCapabilitiesByServer(db)
     const overrides = await db.all<McpPromptOverrideRow>(`SELECT * FROM mcp_prompt_overrides`)
     const overrideMap = new Map(overrides.map((o) => [`${o.server_id}:${o.kind}:${o.name}`, o.prompt]))
-    const byServer = new Map<number, McpCapabilitySnapshot[]>()
-    for (const c of caps) {
-      const list = byServer.get(c.server_id)
-      if (list) list.push(c)
-      else byServer.set(c.server_id, [c])
-    }
     const result: McpToolPromptsResult = {
       servers: servers.map((s) => ({
         server_id: s.id,
@@ -466,8 +433,7 @@ export function registerMcp(app: H3): void {
     const db = getDb(event)
     await db.run(`INSERT INTO mcp_groups (name, description) VALUES (?, ?)`, body.name, body.description ?? '')
     // name 唯一，回查拿完整行
-    const row = await db.get<McpGroupRow>(`SELECT * FROM mcp_groups WHERE name = ?`, body.name)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read inserted row' })
+    const row = await mustGet<McpGroupRow>(db, `SELECT * FROM mcp_groups WHERE name = ?`, body.name)
     // 新建组默认没有能力选择；只有显式 1 才写入开启行
     if (body.web_search === 1) {
       await db.run(`INSERT OR IGNORE INTO mcp_group_web_search (group_id) VALUES (?)`, row.id)
@@ -483,16 +449,17 @@ export function registerMcp(app: H3): void {
     const db = getDb(event)
     const exists = await db.get(`SELECT id FROM mcp_groups WHERE id = ?`, id)
     if (!exists) throw new HTTPError({ status: 404, message: 'mcp group not found' })
-    // 先校验能力白名单：无效请求不能先改掉组名/描述/搜索开关
-    if (body.capabilities !== undefined) {
+    // 先校验能力白名单：无效请求不能先改掉组名/描述/搜索开关（一次读出涉及 server 的快照键集合）
+    if (body.capabilities !== undefined && body.capabilities.length > 0) {
+      const serverIds = [...new Set(body.capabilities.map((c) => c.server_id))]
+      const rows = await db.all<{ server_id: number; kind: string; name: string }>(
+        `SELECT server_id, kind, name FROM mcp_capabilities
+          WHERE server_id IN (${serverIds.map(() => '?').join(', ')})`,
+        ...serverIds,
+      )
+      const known = new Set(rows.map((r) => `${r.server_id}:${r.kind}:${r.name}`))
       for (const c of body.capabilities) {
-        const known = await db.get(
-          `SELECT 1 FROM mcp_capabilities WHERE server_id = ? AND kind = ? AND name = ?`,
-          c.server_id,
-          c.kind,
-          c.name,
-        )
-        if (!known) {
+        if (!known.has(`${c.server_id}:${c.kind}:${c.name}`)) {
           throw new HTTPError({
             status: 400,
             message: `unknown capability ${c.server_id}:${c.kind}:${c.name}`,
@@ -532,8 +499,7 @@ export function registerMcp(app: H3): void {
     } else if (body.web_search === 0) {
       await db.run(`DELETE FROM mcp_group_web_search WHERE group_id = ?`, id)
     }
-    const row = await db.get<McpGroupRow>(`SELECT * FROM mcp_groups WHERE id = ?`, id)
-    if (!row) throw new HTTPError({ status: 500, message: 'failed to read updated row' })
+    const row = await mustGet<McpGroupRow>(db, `SELECT * FROM mcp_groups WHERE id = ?`, id)
     const members = await db.all<McpGroupCapabilitySelection>(
       `SELECT server_id, kind, name FROM mcp_group_capabilities WHERE group_id = ?`,
       id,
@@ -559,8 +525,7 @@ export function registerMcp(app: H3): void {
     const db = getDb(event)
     const q = getQuery(event)
 
-    const page = Math.max(1, Number(q.page) || 1)
-    const pageSize = Math.min(100, Math.max(1, Number(q.pageSize) || 20))
+    const { limit, offset } = pagingParams(event)
 
     const where: string[] = []
     const params: (string | number)[] = []
@@ -574,14 +539,14 @@ export function registerMcp(app: H3): void {
     }
     const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''
 
-    const totalRow = await db.get<{ total: number }>(`SELECT count(*) AS total FROM mcp_logs${whereSql}`, ...params)
+    const totalRow = await mustGet<{ total: number }>(db, `SELECT count(*) AS total FROM mcp_logs${whereSql}`, ...params)
     const rows = await db.all<McpLogRow>(
       `SELECT * FROM mcp_logs${whereSql} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
       ...params,
-      pageSize,
-      (page - 1) * pageSize,
+      limit,
+      offset,
     )
-    const result: Paged<McpLogRow> = { rows, total: totalRow?.total ?? 0 }
+    const result: Paged<McpLogRow> = { rows, total: totalRow.total }
     return result
   })
 

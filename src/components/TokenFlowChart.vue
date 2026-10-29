@@ -6,7 +6,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import type { StatsResult } from '../../shared/api'
-import { observeChartTheme, readChartTheme, withAlpha } from '@/lib/chartTheme'
+import { escapeHtml, readChartTheme, useChartTheme, withAlpha } from '@/lib/chartTheme'
 
 use([CanvasRenderer, SankeyChart, TooltipComponent])
 
@@ -31,18 +31,7 @@ const emit = defineEmits<{
 }>()
 
 const { locale, t } = useI18n()
-const themeVersion = ref(0)
-let stopThemeObserver: (() => void) | null = null
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char]!)
-}
+const { themeVersion } = useChartTheme()
 
 function formatTokens(value: number): string {
   return new Intl.NumberFormat(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US', {
@@ -238,16 +227,6 @@ const chartOption = computed(() => {
   }
 })
 
-onMounted(() => {
-  stopThemeObserver = observeChartTheme(() => {
-    themeVersion.value += 1
-  })
-})
-
-onBeforeUnmount(() => {
-  stopThemeObserver?.()
-  stopThemeObserver = null
-})
 </script>
 
 <template>

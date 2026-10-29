@@ -52,20 +52,19 @@ export interface ConcurrencyTarget {
 
 /** 并发许可：受限请求的真 lease；两 limit 均 0 时返回共享 no-op permit */
 export interface ConcurrencyPermit {
-  /** 真 permit：lease 丢失/释放时 abort；no-op permit 恒为 null */
-  readonly signal: AbortSignal | null
-  /** 真 permit：lost/released 时各 resolve 一次；no-op permit 恒为 null */
-  readonly finished: Promise<void> | null
-  /** 是否已丢失（lease 过期/被强制删除/空窗后迟到续租） */
-  lost(): boolean
+  /** lease 丢失（过期/被强制删除/空窗后迟到续租）时 abort；no-op permit 恒不 abort */
+  readonly signal: AbortSignal
+  /** lost/released 时 resolve；no-op permit 已 resolve */
+  readonly finished: Promise<void>
   /** 幂等释放：首次调用停续租、resolve finished、best-effort DELETE；后续返回同一 promise */
   release(): Promise<void>
 }
 
+const noOpSignal = new AbortController().signal
+
 const noOpPermit: ConcurrencyPermit = {
-  signal: null,
-  finished: null,
-  lost: () => false,
+  signal: noOpSignal,
+  finished: Promise.resolve(),
   release: async () => {},
 }
 
@@ -73,9 +72,7 @@ type PermitState = 'active' | 'lost' | 'released'
 
 interface RealPermitState {
   state: PermitState
-  abortController: AbortController | null
   resolveFinished: (() => void) | null
-  finished: Promise<void>
   releasePromise: Promise<void> | null
 }
 
@@ -114,12 +111,10 @@ export async function tryAcquireConcurrency(
   const abortController = new AbortController()
   const st: RealPermitState = {
     state: 'active',
-    abortController,
     resolveFinished: null,
-    finished: null as unknown as Promise<void>,
     releasePromise: null,
   }
-  st.finished = new Promise<void>((resolve) => {
+  const finished = new Promise<void>((resolve) => {
     st.resolveFinished = resolve
   })
 
@@ -192,12 +187,10 @@ export async function tryAcquireConcurrency(
 
   return {
     signal: abortController.signal,
-    finished: st.finished,
-    lost: () => st.state === 'lost',
+    finished,
     release: () => {
       if (!st.releasePromise) {
         st.releasePromise = (async () => {
-          if (st.state === 'released') return
           if (st.state === 'lost') {
             // lost 后 release 只 best-effort DELETE，不改变 lost 结果
             await db.run(DELETE_SQL, leaseId).catch(() => {})
@@ -217,7 +210,7 @@ export async function tryAcquireConcurrency(
 }
 
 /**
- * 排队获取并发许可（仅 embedding）：满员时在 maxWaitMs 内带抖动重试准入，
+ * 排队获取并发许可（仅 embedding）：满员时在 QUEUE_MAX_WAIT_MS 内带抖动重试准入，
  * signal 中止或超时未拿到返回 null。chat/responses 不排队，仍用 tryAcquireConcurrency。
  * 截止时间检测基于 Date.now()，每轮 D1/SQLite 查询刷新 I/O 时钟（Workers 时钟只在
  * I/O 时前进），sleep 后复查一次，避免睡眠末尾越过截止点多发一次尝试。
@@ -225,16 +218,15 @@ export async function tryAcquireConcurrency(
 export async function acquireQueuedConcurrency(
   db: Db,
   target: ConcurrencyTarget,
-  opts: { maxWaitMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+  signal?: AbortSignal,
 ): Promise<ConcurrencyPermit | null> {
-  const { maxWaitMs = QUEUE_MAX_WAIT_MS, intervalMs = QUEUE_INTERVAL_MS, signal } = opts
-  const deadline = Date.now() + maxWaitMs
+  const deadline = Date.now() + QUEUE_MAX_WAIT_MS
   for (;;) {
     if (signal?.aborted) return null
     const permit = await tryAcquireConcurrency(db, target)
     if (permit) return permit
     if (Date.now() >= deadline || signal?.aborted) return null
     // tsconfig lib 为 ES2022，无 Promise.withResolvers；setTimeout 回调 API 需 executor 形式
-    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs * (0.5 + Math.random())))
+    await new Promise<void>((resolve) => setTimeout(resolve, QUEUE_INTERVAL_MS * (0.5 + Math.random())))
   }
 }

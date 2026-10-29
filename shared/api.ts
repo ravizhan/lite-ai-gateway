@@ -240,10 +240,7 @@ export interface StatsResult {
     cost: number
     avg_ttft_ms: number | null
     avg_tps: number | null
-    cache_rate: number
   }
-  topModels: { model: string; requests: number; cost: number; tokens: number }[]
-  buckets: { ts: string; requests: number; cost: number }[]
   modelBuckets: { ts: string; model: string; requests: number; cost: number; tokens: number }[]
   tokenFlows: {
     model: string
@@ -280,8 +277,7 @@ export interface McpServerWithCounts extends McpServerRow {
   resource_count: number
 }
 
-/** 单 server 能力明细 + 计数（GET /api/admin/mcp/servers/:id/capabilities 与
- *  GET /api/admin/mcp/capabilities 的 servers[] 元素） */
+/** 单 server 能力明细 + 计数（GET /api/admin/mcp/capabilities 的 servers[] 元素） */
 export interface McpServerCapabilities {
   server_id: number
   server_name: string

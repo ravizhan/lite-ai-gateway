@@ -6,12 +6,8 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { getDb } from '../db/index.ts'
 import { createHubServer } from './hub.ts'
 import { loadGroupSelection, loadServers } from './routes.ts'
-import {
-  instrumentTransport,
-  isJsonRpcMessage,
-  logMcpRejection,
-  type McpLogContext,
-} from './transport-log.ts'
+import { handleMessagesPost } from './sse-messages.ts'
+import { instrumentTransport, type McpLogContext } from './transport-log.ts'
 
 /** 空闲等待上限（毫秒）：到点写一条 SSE 注释帧 */
 const SSE_HEARTBEAT_MS = 15_000
@@ -24,7 +20,6 @@ interface WorkersSseSession {
   server: Server
   /** POST /messages 入队，由存活的 GET 上下文投递给协议层 */
   transport: WorkersSseTransport
-  group: string | null
   /** 日志与协议处理共用仍在发送响应流的 GET 生命周期 */
   ctx: McpLogContext
 }
@@ -212,19 +207,6 @@ class WorkersSseStream {
 }
 
 /**
- * /messages 的 JSON-RPC 错误体（会话不存在 -32001 / 报文非法 -32600 / 非法 JSON -32700）。
- * 返回字符串：日志 response_body 与实际响应体同源，保证“记的就是发的”。
- */
-function jsonRpcErrorBody(code: number, message: string): string {
-  return JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } })
-}
-
-/** JSON 响应（错误体已就绪） */
-function jsonResponse(body: string, status: number): Response {
-  return new Response(body, { status, headers: { 'content-type': 'application/json' } })
-}
-
-/**
  * 注册 Workers 端 MCP-over-SSE 端点（认证由父级挂 apiKeyMw 中间件）。
  * GET /sse[/:group]：建会话 → 返回 SSE 流（首帧 endpoint，随后队列消息）；
  * POST /messages?sessionId=：投递客户端消息 → 202。
@@ -243,7 +225,6 @@ export function registerWorkersSse(app: H3): void {
     const logger = instrumentTransport(transport, ctx)
     const session: WorkersSseSession = {
       transport,
-      group,
       ctx,
       server: createHubServer({
         db,
@@ -287,58 +268,12 @@ export function registerWorkersSse(app: H3): void {
   app.get('/sse/:group', handleSse)
 
   app.post('/messages', async (event): Promise<Response> => {
-    const db = getDb(event)
     const sessionId = event.url.searchParams.get('sessionId')
-    const session = sessionId ? sessions.get(sessionId) : undefined
-    // 原始请求体先读一次：即使会话不存在/报文非法，日志里也要留下真实输入
-    let rawBody: string | null = null
-    let body: unknown
-    let bodyParsed: boolean
-    try {
-      rawBody = await event.req.text()
-      body = JSON.parse(rawBody)
-      bodyParsed = true
-    } catch {
-      bodyParsed = false
-    }
-    if (!session) {
-      const body = jsonRpcErrorBody(-32001, 'session not found')
-      await logMcpRejection(
-        // 会话未找到时组名只能取端点 query（/messages 无 :group 路由参数）
-        { db, groupName: event.url.searchParams.get('group') },
-        {
-          method: 'POST /messages',
-          error: 'HTTP 404: session not found',
-          requestBody: rawBody,
-          responseBody: body,
-        },
-      )
-      return jsonResponse(body, 404)
-    }
-    const mediaType = (event.req.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-    if (mediaType !== 'application/json') {
-      const message = `Unsupported content-type: ${mediaType || '(missing)'}`
-      await logMcpRejection(session.ctx, {
-        method: 'POST /messages',
-        error: `HTTP 400: ${message}`,
-        requestBody: rawBody,
-        responseBody: message,
-      })
-      return new Response(message, { status: 400 })
-    }
-    if (!bodyParsed || !isJsonRpcMessage(body)) {
-      const message = bodyParsed ? `Invalid message: ${rawBody ?? ''}` : 'Parse error: Invalid JSON'
-      const responseBody = jsonRpcErrorBody(bodyParsed ? -32600 : -32700, message)
-      await logMcpRejection(session.ctx, {
-        method: 'POST /messages',
-        error: `HTTP 400: ${message}`,
-        requestBody: rawBody,
-        responseBody,
-      })
-      return jsonResponse(responseBody, 400)
-    }
-    // 在 GET 的存活上下文执行异步 handler；POST 只接收消息并返回 202。
-    session.transport.receive(body as JSONRPCMessage)
-    return new Response('Accepted', { status: 202 })
+    const session = (sessionId ? sessions.get(sessionId) : undefined) ?? null
+    return handleMessagesPost(event, getDb(event), session, async (target, message) => {
+      // 在 GET 的存活上下文执行异步 handler；POST 只接收消息并返回 202。
+      target.transport.receive(message)
+      return new Response('Accepted', { status: 202 })
+    })
   })
 }

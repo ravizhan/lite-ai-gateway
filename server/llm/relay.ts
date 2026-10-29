@@ -1,4 +1,4 @@
-import { getRequestIP, onDispose, type H3Event } from 'h3'
+import { getRequestIP, type H3Event } from 'h3'
 import { getDb } from '../db/index.ts'
 import { gatewayError } from '../../shared/api.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
@@ -12,11 +12,7 @@ import {
   type AffinityBinding,
   type AffinityKey,
 } from './session-affinity.ts'
-import {
-  resolveExplicitRoute,
-  resolveRoute,
-  type RoutedProvider,
-} from './router.ts'
+import type { RoutedProvider } from './router.ts'
 import { loadGatewaySettings } from '../settings.ts'
 import {
   calcTps,
@@ -25,6 +21,17 @@ import {
   type NormalizedUsage,
 } from './usage.ts'
 import { createSseTap } from './sse-tap.ts'
+import {
+  MAX_DETAIL_BODY,
+  cancelBody,
+  concatDetailChunks,
+  concurrencyStateUnavailable,
+  readBodyText,
+  readRelayRequestBody,
+  resolveRelayRoute,
+  routingStateUnavailable,
+  trackPermit,
+} from './relay-support.ts'
 
 interface RelayOpts {
   protocol: 'chat' | 'responses'
@@ -33,11 +40,11 @@ interface RelayOpts {
 
 /** llm_logs 落库行（usage/ttft/tps/error 缺省由 insertLog 兜底为 0/null；cost 不在行内传递） */
 interface LogEntry {
-  apiKeyId: number | null
+  apiKeyId: number
   protocol: 'chat' | 'responses'
   model: string
-  providerId: number | null
-  providerName: string | null
+  providerId: number
+  providerName: string
   stream: 0 | 1
   status: number
   durationMs: number
@@ -103,54 +110,6 @@ async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
   )
 }
 
-function routingStateUnavailable(): Response {
-  return gatewayError(503, 'routing state unavailable', 'api_error')
-}
-
-function concurrencyStateUnavailable(): Response {
-  return gatewayError(503, 'concurrency state unavailable', 'api_error')
-}
-
-async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
-  if (!body) return
-  try {
-    await body.cancel()
-  } catch {
-    // The connection is already ending; permit release must still proceed.
-  }
-}
-
-/** 错误详情捕获上限 256KB（超出截断，防止异常大响应撑爆单行） */
-const MAX_DETAIL_BODY = 256 * 1024
-
-/** 读取整个响应体为文本（截断到 MAX_DETAIL_BODY）；仅错误路径调用 */
-async function readBodyText(body: ReadableStream<Uint8Array> | null): Promise<string | null> {
-  if (!body) return null
-  try {
-    const reader = body.getReader()
-    const chunks: Uint8Array[] = []
-    let len = 0
-    while (len < MAX_DETAIL_BODY) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(value)
-      len += value.byteLength
-    }
-    void reader.cancel().catch(() => {})
-    const all = new Uint8Array(Math.min(len, MAX_DETAIL_BODY))
-    let off = 0
-    for (const c of chunks) {
-      const slice = c.subarray(0, Math.min(c.byteLength, all.byteLength - off))
-      all.set(slice, off)
-      off += slice.byteLength
-      if (off >= all.byteLength) break
-    }
-    return new TextDecoder().decode(all)
-  } catch {
-    return null
-  }
-}
-
 /**
  * 透传同时捕获全文（截断到 MAX_DETAIL_BODY）；流结束后 resolve 捕获文本。
  * 用于 4xx 透传分支：字节原样转发给客户端，结束后把完整响应体写进日志。
@@ -174,15 +133,7 @@ function captureTap(source: ReadableStream<Uint8Array>): {
       controller.enqueue(chunk)
     },
     flush() {
-      const all = new Uint8Array(Math.min(len, MAX_DETAIL_BODY))
-      let off = 0
-      for (const c of chunks) {
-        const slice = c.subarray(0, Math.min(c.byteLength, all.byteLength - off))
-        all.set(slice, off)
-        off += slice.byteLength
-        if (off >= all.byteLength) break
-      }
-      resolveText(new TextDecoder().decode(all))
+      resolveText(new TextDecoder().decode(concatDetailChunks(chunks, len)))
     },
   })
   // 取消/断流：pipeTo 可能 reject，也可能在 flush 未执行时 resolve（老版本 Workers 的取消路径）；
@@ -207,67 +158,25 @@ export async function relayResponses(event: H3Event): Promise<Response> {
  * - 流式一旦开始转发即不再切换（中途断流由 sse-tap 记 error 日志）。
  */
 async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
-  // 认证由父级 app.ts 挂载的 app.use('/v1/**', apiKeyMw) 完成（见 server/auth.ts requireApiKey）。
-  const apiKeyId = event.context.apiKeyId as number | undefined
-  if (apiKeyId === undefined) return routingStateUnavailable()
+  // 认证由父级 app.ts 挂载的 app.use('/v1/**', apiKeyMw) 完成（见 server/auth.ts requireApiKey），
+  // 到达此处的请求必然带 apiKeyId。
+  const apiKeyId = event.context.apiKeyId as number
 
   const clientIp = getRequestIP(event) ?? null
   const t0 = performance.now()
 
-  // 原始 bytes 用于逐 provider 原样重放；解析对象仅用于 routing/session 状态。
-  let rawBody: ArrayBuffer
-  try {
-    rawBody = await event.req.arrayBuffer()
-  } catch {
-    return gatewayError(400, 'failed to read request body')
-  }
-
-  let body: Record<string, unknown>
-  let requestedModel: string
-  let stream: boolean
-  let clientReqBody: string
-  try {
-    clientReqBody = new TextDecoder().decode(rawBody)
-    const parsed = JSON.parse(clientReqBody) as unknown
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return gatewayError(400, 'invalid JSON body')
-    }
-    body = parsed as Record<string, unknown>
-    if (typeof body.model !== 'string' || body.model.length === 0) {
-      return gatewayError(400, 'missing model parameter')
-    }
-    requestedModel = body.model
-    stream = body.stream === true
-  } catch {
-    return gatewayError(400, 'invalid JSON body')
-  }
+  const request = await readRelayRequestBody(event)
+  if (request instanceof Response) return request
+  const { rawBody, body, text: clientReqBody } = request
+  const requestedModel = request.model
+  const stream = body.stream === true
 
   const db = getDb(event)
   // model = 对外模型 id（路由/计费/并发/日志统一使用）；upstream_model 由各 provider 行的 alias 映射决定
-  let model = requestedModel
-  let candidates: RoutedProvider[]
-  let explicitSelection = false
-  const requestPath = new URL(event.req.url, 'http://gateway.local').pathname
-  try {
-    const explicit = await resolveExplicitRoute(db, requestedModel, opts.protocol)
-    if (explicit.matched) {
-      if (!explicit.provider) return gatewayError(explicit.status, explicit.message)
-      explicitSelection = true
-      model = explicit.model
-      candidates = [explicit.provider]
-    } else {
-      const routed = await resolveRoute(db, requestedModel)
-      candidates =
-        opts.protocol === 'responses'
-          ? routed.filter((provider) => provider.type === 'llm' && provider.supports_responses === 1)
-          : routed
-    }
-  } catch {
-    return routingStateUnavailable()
-  }
-  if (candidates.length === 0) {
-    return gatewayError(404, `no provider for model ${requestedModel}`)
-  }
+  const route = await resolveRelayRoute(db, requestedModel, opts.protocol)
+  if (route instanceof Response) return route
+  const { model, candidates, explicitSelection } = route
+  const requestPath = `/v1${opts.path}`
 
   let affinityKey: AffinityKey | null = null
   let affinityBinding: AffinityBinding | null = null
@@ -303,12 +212,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
   let coordinationSteps = 0
   const maxCoordinationSteps = candidates.length + 1
 
-  const trackPermit = (permit: ConcurrencyPermit): void => {
-    if (!permit.finished) return
-    onDispose(event, () => permit.release())
-    event.waitUntil(permit.finished)
-  }
-
   const acquire = async (provider: RoutedProvider): Promise<ConcurrencyPermit | null> => {
     const permit = await tryAcquireConcurrency(db, {
       providerId: provider.id,
@@ -316,7 +219,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
       providerLimit: provider.max_concurrency,
       routeLimit: provider.route_max_concurrency,
     })
-    if (permit) trackPermit(permit)
+    if (permit) trackPermit(event, permit)
     return permit
   }
 
@@ -354,9 +257,6 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
     return null
   }
 
-  // 只保留最近一次 alias 编码，避免相同上游模型重试时重复序列化，也不按 provider 累积大请求体。
-  let encodedModel = requestedModel
-  let encodedBody: BodyInit = rawBody
   while (true) {
     let provider: RoutedProvider | null = null
     let permit: ConcurrencyPermit | null = null
@@ -404,7 +304,8 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
         await permit.release()
         return routingStateUnavailable()
       }
-      if (claimed.providerId === boundProvider.id && claimed.owned) {
+      // claim 的 CASE 让 provider_id 与 token 同时切换：返回的 provider 是本次目标即为本次 token 持有者
+      if (claimed.providerId === boundProvider.id) {
         affinityBinding = claimed
         provider = boundProvider
         break
@@ -443,7 +344,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
             await permit.release()
             return routingStateUnavailable()
           }
-          if (claimed.providerId !== candidate.id || !claimed.owned) {
+          if (claimed.providerId !== candidate.id) {
             await permit.release()
             permit = null
             affinityBinding = claimed
@@ -470,24 +371,16 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
       }
     }
 
-    if (permit.lost()) {
-      await permit.release()
-      return logLeaseLost(provider)
-    }
-
-    const leaseSignal = permit.signal
-      ? AbortSignal.any([event.req.signal, permit.signal])
-      : event.req.signal
+    const leaseSignal = AbortSignal.any([event.req.signal, permit.signal])
     const signal = stream ? leaseSignal : upstreamTimeout(provider, leaseSignal)
     triedProviderIds.add(provider.id)
     attemptedUpstream = true
 
     // alias 映射（或 provider/model 显式选择）导致上游模型 id 与客户端请求不同时，重写 body 里的 model 字段
-    if (provider.upstream_model !== requestedModel && provider.upstream_model !== encodedModel) {
-      encodedBody = new TextEncoder().encode(JSON.stringify({ ...body, model: provider.upstream_model }))
-      encodedModel = provider.upstream_model
-    }
-    const upstreamBody = provider.upstream_model === requestedModel ? rawBody : encodedBody
+    const upstreamBody =
+      provider.upstream_model === requestedModel
+        ? rawBody
+        : new TextEncoder().encode(JSON.stringify({ ...body, model: provider.upstream_model }))
     let res: Response | null = null
     let fetchErr: string | null = null
     // TTFT 计时起点：从发起上游连接起算；此前的 body 解析、路由、并发租约等网关内部处理不计入
@@ -508,7 +401,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
     }
 
     if (!res) {
-      const leaseLost = permit.lost()
+      const leaseLost = permit.signal.aborted
       await permit.release()
       if (leaseLost) return logLeaseLost(provider)
 
@@ -526,7 +419,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
       continue
     }
 
-    if (permit.lost()) {
+    if (permit.signal.aborted) {
       await cancelBody(res.body)
       await permit.release()
       return logLeaseLost(provider)
@@ -534,7 +427,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
 
     if (res.status >= 500) {
       const respBody = await readBodyText(res.body)
-      const leaseLost = permit.lost()
+      const leaseLost = permit.signal.aborted
       await permit.release()
       if (leaseLost) return logLeaseLost(provider)
 
@@ -554,29 +447,12 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
     }
 
     if (res.status >= 400) {
-      if (permit.lost()) {
-        await cancelBody(res.body)
-        await permit.release()
-        return logLeaseLost(provider)
-      }
-      if (!res.body) {
-        await permit.release()
-        await insertLog(event, {
-          ...base,
-          providerId: provider.id,
-          providerName: provider.name,
-          status: res.status,
-          durationMs: Math.round(performance.now() - t0),
-          error: sanitizeError(`upstream ${res.status}`),
-          reqBody: clientReqBody,
-        })
-        return res
-      }
-
+      // 4xx 响应必带 body 流：无 body 的上游状态码只有 101/204/205/304
+      const source = res.body as ReadableStream<Uint8Array>
       const headers = new Headers(res.headers)
       headers.delete('content-length')
       // 透传同时捕获全文；响应体结束后落库完整请求/响应（仅错误请求记录）
-      const tap = captureTap(res.body)
+      const tap = captureTap(source)
       const durationMs = Math.round(performance.now() - t0)
       event.waitUntil(
         (async () => {
@@ -614,7 +490,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
         await permit.release()
       }
 
-      if (permit.lost()) return logLeaseLost(provider)
+      if (permit.signal.aborted) return logLeaseLost(provider)
       if (!buf) {
         await insertLog(event, {
           ...base,
@@ -681,7 +557,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
       if (stateError) return stateError
       continue
     }
-    if (permit.lost()) {
+    if (permit.signal.aborted) {
       await cancelBody(res.body)
       await permit.release()
       return logLeaseLost(provider)
@@ -710,7 +586,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
             : normalizeResponsesUsage(usageRaw)
         // tps 分母同样以上游起点计，保持「流结束 − 首 chunk」生成窗口语义不变
         const tps = calcTps(usage.completion, Math.round(endAt - upstreamStart), ttftMs, true)
-        const finalError = permit.lost() ? 'concurrency lease lost' : error
+        const finalError = permit.signal.aborted ? 'concurrency lease lost' : error
         await insertLog(event, {
           ...base,
           providerId: provider.id,

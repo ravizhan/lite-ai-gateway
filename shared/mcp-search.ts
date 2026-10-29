@@ -60,7 +60,7 @@ export const webSearchResponseSchema = z.strictObject({
 
 export type WebSearchResponse = z.output<typeof webSearchResponseSchema>
 
-/** z.toJSONSchema 的根对象：properties 的值允许 boolean 子 schema，SDK 的 Tool 只接受对象 */
+/** z.toJSONSchema 的根对象（properties 的值在类型上是 unknown，SDK 的 Tool 要求对象） */
 interface GeneratedObjectSchema {
   properties?: Record<string, unknown>
   required?: string[]
@@ -69,18 +69,12 @@ interface GeneratedObjectSchema {
 
 /** 把 zod 生成的根 schema 收窄为 SDK Tool 的根对象形状（保留 type: 'object' 字面量） */
 function toolObjectSchema(generated: GeneratedObjectSchema): Tool['inputSchema'] {
-  const { properties: generatedProperties, ...rest } = generated
-  const properties: Record<string, object> = {}
-  for (const [key, value] of Object.entries(generatedProperties ?? {})) {
-    if (typeof value !== 'object' || value === null) {
-      throw new Error(`unsupported boolean JSON schema at property: ${key}`)
-    }
-    properties[key] = value
-  }
+  const { properties, ...rest } = generated
   return {
     ...rest,
     type: 'object',
-    ...(generatedProperties ? { properties } : {}),
+    // zod 生成的每个属性都是对象 schema（draft-07 下没有 boolean 子 schema）
+    ...(properties ? { properties: properties as Record<string, object> } : {}),
   }
 }
 
@@ -139,8 +133,8 @@ export interface McpSearchPresetsResult {
 
 /** POST /api/admin/mcp/search/preview：只执行指定方向的转换与校验，不读库、不连上游 */
 export type McpSearchPreviewRequest =
-  | { stage: 'request'; code: string; request: WebSearchRequest }
-  | { stage: 'response'; code: string; request: WebSearchRequest; response: Record<string, unknown> }
+  | { stage: 'request'; code: string; request: NormalizedWebSearchRequest }
+  | { stage: 'response'; code: string; request: NormalizedWebSearchRequest; response: Record<string, unknown> }
 
 export interface McpSearchPreviewResult {
   output: Record<string, unknown> | WebSearchResponse

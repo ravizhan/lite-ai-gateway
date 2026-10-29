@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { NavigationMenuItem } from '@nuxt/ui'
 import { api } from '../lib/api'
-import { setLocale, type AppLocale } from '../lib/i18n'
+import { setLocale } from '../lib/i18n'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import type { AdminInfo } from '../../shared/api'
@@ -19,10 +19,6 @@ const localeOptions = [
   { label: 'English', value: 'en' },
   { label: '中文', value: 'zh-CN' },
 ]
-
-function changeLocale(value: string | AppLocale) {
-  setLocale(value)
-}
 
 onMounted(async () => {
   try {
@@ -123,7 +119,13 @@ const items = computed<NavigationMenuItem[][]>(() => [
           <span class="truncate text-sm font-medium text-(--ui-text-highlighted) md:hidden">Lite AI Gateway</span>
         </div>
         <div class="flex shrink-0 items-center gap-1">
-          <USelect v-model="locale" :items="localeOptions" class="w-[92px]" size="sm" @update:model-value="changeLocale" />
+          <USelect
+            :model-value="locale"
+            :items="localeOptions"
+            class="w-[92px]"
+            size="sm"
+            @update:model-value="setLocale"
+          />
           <UColorModeSelect class="w-28" size="sm" />
           <UTooltip :text="t('nav.signOut')">
             <UButton icon="i-lucide-log-out" color="neutral" variant="ghost" :aria-label="t('nav.signOut')" @click="logout" />

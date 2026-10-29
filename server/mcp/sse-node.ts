@@ -3,41 +3,20 @@ import type { H3, H3Event } from 'h3'
 import { getRouterParam } from 'h3'
 import { HTTPError } from 'h3'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { getDb } from '../db/index.ts'
 import { createHubServer } from './hub.ts'
 import { loadGroupSelection, loadServers } from './routes.ts'
-import {
-  instrumentTransport,
-  isJsonRpcMessage,
-  logMcpRejection,
-  type McpLogContext,
-  type TransportLogger,
-} from './transport-log.ts'
-
-/**
- * /messages 的 JSON-RPC 错误体（会话不存在 -32001 / 报文非法 -32600 / 非法 JSON -32700）。
- * 返回字符串：日志 response_body 与实际响应体同源，保证“记的就是发的”。
- */
-function jsonRpcErrorBody(code: number, message: string): string {
-  return JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } })
-}
-
-/** JSON 响应（错误体已就绪） */
-function jsonResponse(body: string, status: number): Response {
-  return new Response(body, { status, headers: { 'content-type': 'application/json' } })
-}
+import { handleMessagesPost } from './sse-messages.ts'
+import { instrumentTransport, type McpLogContext, type TransportLogger } from './transport-log.ts'
 
 interface NodeSseEntry {
   transport: SSEServerTransport
-  server: Server
-  group: string | null
   /** 长连接会话的日志上下文；每次请求刷新 waitUntil（关闭补记要挂在活的请求生命周期上） */
   ctx: McpLogContext
   logger: TransportLogger
 }
 
-// sessionId → { transport, server, group }；POST /messages 按 sessionId 路由
+// sessionId → { transport, ctx, logger }；POST /messages 按 sessionId 路由
 const transports = new Map<string, NodeSseEntry>()
 
 /**
@@ -51,7 +30,7 @@ export function registerNodeSse(app: H3): void {
     const rawGroup = getRouterParam(event, 'group')
     const group = rawGroup === undefined ? null : decodeURIComponent(rawGroup)
     const node = event.runtime?.node
-    if (event.runtime?.name !== 'node' || !node?.res) {
+    if (!node?.res) {
       throw new HTTPError({ status: 500, message: 'sse endpoint requires node runtime' })
     }
     const servers = await loadServers(db, group)
@@ -81,7 +60,7 @@ export function registerNodeSse(app: H3): void {
       selection,
       onRoute: (info) => logger.setRoute(info),
     })
-    transports.set(transport.sessionId, { transport, server, group, ctx, logger })
+    transports.set(transport.sessionId, { transport, ctx, logger })
     await server.connect(transport) // connect → transport.start()：写 SSE 头 + endpoint 帧
     // SSEServerTransport 已把响应直接写入 node res；这里返回一个“永不结束”的
     // 占位流，防止 h3/srvx 在 handler 返回后立即 end() 响应截断 SSE 连接
@@ -99,81 +78,25 @@ export function registerNodeSse(app: H3): void {
   app.get('/sse/:group', handleSse)
 
   app.post('/messages', async (event): Promise<Response | undefined> => {
-    const db = getDb(event)
     const sessionId = event.url.searchParams.get('sessionId')
-    const entry = sessionId ? transports.get(sessionId) : undefined
-    // 原始请求体先读一次：即使会话不存在/报文非法，日志里也要留下真实输入
-    let rawBody: string | null = null
-    let parsedBody: unknown
-    let bodyParsed: boolean
-    try {
-      rawBody = await event.req.text()
-      parsedBody = JSON.parse(rawBody)
-      bodyParsed = true
-    } catch {
-      bodyParsed = false
-    }
-    if (!entry) {
-      const body = jsonRpcErrorBody(-32001, 'session not found')
-      await logMcpRejection(
-        // 会话未找到时组名只能取端点 query（/messages 无 :group 路由参数）
-        { db, groupName: event.url.searchParams.get('group') },
-        {
-          method: 'POST /messages',
-          error: 'HTTP 404: session not found',
-          requestBody: rawBody,
-          responseBody: body,
-        },
-      )
-      return jsonResponse(body, 404)
-    }
-    const node = event.runtime?.node
-    if (event.runtime?.name !== 'node' || !node?.req || !node?.res) {
-      throw new HTTPError({ status: 500, message: 'messages endpoint requires node runtime' })
-    }
+    const entry = (sessionId ? transports.get(sessionId) : undefined) ?? null
     // 会话是长连接：把落库生命周期挂到当前请求上（关闭补记/通知落库才有存活窗口）
-    entry.ctx.waitUntil = (promise) => event.waitUntil(promise)
-    const mediaType = (event.req.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-    if (mediaType !== 'application/json') {
-      const message = `Unsupported content-type: ${mediaType || '(missing)'}`
-      await logMcpRejection(entry.ctx, {
-        method: 'POST /messages',
-        error: `HTTP 400: ${message}`,
-        requestBody: rawBody,
-        responseBody: message,
-      })
-      return new Response(message, { status: 400 })
-    }
-    if (!bodyParsed) {
-      const body = jsonRpcErrorBody(-32700, 'Parse error: Invalid JSON')
-      await logMcpRejection(entry.ctx, {
-        method: 'POST /messages',
-        error: 'HTTP 400: Parse error: Invalid JSON',
-        requestBody: rawBody,
-        responseBody: body,
-      })
-      return jsonResponse(body, 400)
-    }
-    if (!isJsonRpcMessage(parsedBody)) {
-      // 结构非法的 JSON-RPC 报文：SDK 会写 400 但不记日志，这里自行判定并留痕
-      const message = `Invalid message: ${rawBody ?? ''}`
-      await logMcpRejection(entry.ctx, {
-        method: 'POST /messages',
-        error: `HTTP 400: ${message}`,
-        requestBody: rawBody,
-        responseBody: message,
-      })
-      return new Response(message, { status: 400 })
-    }
-    // handlePostMessage 自行写 node res（202 Accepted 或错误响应）
-    await entry.transport.handlePostMessage(
-      node.req as unknown as IncomingMessage,
-      node.res as unknown as ServerResponse,
-      parsedBody,
-    )
-    // 通知等无法 await 的落库在此等到可见（请求行在 transport.send 内已先落库再写出）
-    await entry.logger.settled()
-    // 返回 undefined：h3 对已结束的 res 再 end() 是 no-op（srvx writeHead 也会跳过）
-    return undefined
+    if (entry) entry.ctx.waitUntil = (promise) => event.waitUntil(promise)
+    return handleMessagesPost(event, getDb(event), entry, async (session, message) => {
+      const node = event.runtime?.node
+      if (!node?.req || !node?.res) {
+        throw new HTTPError({ status: 500, message: 'messages endpoint requires node runtime' })
+      }
+      // handlePostMessage 自行写 node res（202 Accepted 或错误响应）
+      await session.transport.handlePostMessage(
+        node.req as unknown as IncomingMessage,
+        node.res as unknown as ServerResponse,
+        message,
+      )
+      // 通知等无法 await 的落库在此等到可见（请求行在 transport.send 内已先落库再写出）
+      await session.logger.settled()
+      // 返回 undefined：h3 对已结束的 res 再 end() 是 no-op（srvx writeHead 也会跳过）
+      return undefined
+    })
   })
 }
