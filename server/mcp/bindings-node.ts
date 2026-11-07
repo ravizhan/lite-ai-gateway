@@ -1,5 +1,6 @@
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { nodeWebFetchHop } from './fetch-node.ts'
 import { setNodeMcpBindings } from './node-bindings.ts'
 import { registerNodeSse } from './sse-node.ts'
 
@@ -13,5 +14,6 @@ export function installNodeMcpBindings(): void {
     createStdioTransport: ({ command, args, env }) =>
       new StdioClientTransport({ command, args, env: { ...getDefaultEnvironment(), ...env } }),
     createSseTransport: (url, headers) => new SSEClientTransport(url, { requestInit: { headers } }),
+    webFetchHop: nodeWebFetchHop,
   })
 }

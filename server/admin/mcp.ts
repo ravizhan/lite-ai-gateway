@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
 import type { Db } from '../db/types.ts'
+import { unpackLogBody } from '../lib/log-body.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { clearUpstreamCache, discoverCapabilities, testServer } from '../mcp/upstream.ts'
 import type { DiscoveredCapability } from '../mcp/upstream.ts'
@@ -15,6 +16,7 @@ import type {
   McpGroupCapabilitySelection,
   McpGroupRow,
   McpGroupWithCapabilities,
+  McpLogDetail,
   McpLogRow,
   McpPromptOverrideRow,
   McpServerRow,
@@ -37,11 +39,12 @@ const serverSchema = z.object({
 })
 const serverPatchSchema = serverSchema.partial()
 
-/** 分组写入：web_search 为本地内置工具开关（1 开启 / 0 关闭），与能力白名单互相独立 */
+/** 分组写入：web_search / web_fetch 为本地内置工具开关（1 开启 / 0 关闭），与能力白名单互相独立 */
 const groupSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   web_search: z.union([z.literal(0), z.literal(1)]).optional(),
+  web_fetch: z.union([z.literal(0), z.literal(1)]).optional(),
 })
 const groupPatchSchema = groupSchema.partial().extend({
   capabilities: z
@@ -419,10 +422,13 @@ export function registerMcp(app: H3): void {
     }
     const webSearchGroups = await db.all<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_search`)
     const webSearchOn = new Set(webSearchGroups.map((r) => r.group_id))
+    const webFetchGroups = await db.all<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_fetch`)
+    const webFetchOn = new Set(webFetchGroups.map((r) => r.group_id))
     const result: McpGroupWithCapabilities[] = groups.map((g) => ({
       ...g,
       capabilities: byGroup.get(g.id) ?? [],
       web_search: webSearchOn.has(g.id) ? 1 : 0,
+      web_fetch: webFetchOn.has(g.id) ? 1 : 0,
     }))
     return result
   })
@@ -438,7 +444,15 @@ export function registerMcp(app: H3): void {
     if (body.web_search === 1) {
       await db.run(`INSERT OR IGNORE INTO mcp_group_web_search (group_id) VALUES (?)`, row.id)
     }
-    const result: McpGroupWithCapabilities = { ...row, capabilities: [], web_search: body.web_search === 1 ? 1 : 0 }
+    if (body.web_fetch === 1) {
+      await db.run(`INSERT OR IGNORE INTO mcp_group_web_fetch (group_id) VALUES (?)`, row.id)
+    }
+    const result: McpGroupWithCapabilities = {
+      ...row,
+      capabilities: [],
+      web_search: body.web_search === 1 ? 1 : 0,
+      web_fetch: body.web_fetch === 1 ? 1 : 0,
+    }
     return result
   })
 
@@ -499,27 +513,39 @@ export function registerMcp(app: H3): void {
     } else if (body.web_search === 0) {
       await db.run(`DELETE FROM mcp_group_web_search WHERE group_id = ?`, id)
     }
+    // web_fetch 同上
+    if (body.web_fetch === 1) {
+      await db.run(`INSERT OR IGNORE INTO mcp_group_web_fetch (group_id) VALUES (?)`, id)
+    } else if (body.web_fetch === 0) {
+      await db.run(`DELETE FROM mcp_group_web_fetch WHERE group_id = ?`, id)
+    }
     const row = await mustGet<McpGroupRow>(db, `SELECT * FROM mcp_groups WHERE id = ?`, id)
     const members = await db.all<McpGroupCapabilitySelection>(
       `SELECT server_id, kind, name FROM mcp_group_capabilities WHERE group_id = ?`,
       id,
     )
     const webSearch = await db.get<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_search WHERE group_id = ?`, id)
-    const result: McpGroupWithCapabilities = { ...row, capabilities: members, web_search: webSearch ? 1 : 0 }
+    const webFetch = await db.get<{ group_id: number }>(`SELECT group_id FROM mcp_group_web_fetch WHERE group_id = ?`, id)
+    const result: McpGroupWithCapabilities = {
+      ...row,
+      capabilities: members,
+      web_search: webSearch ? 1 : 0,
+      web_fetch: webFetch ? 1 : 0,
+    }
     return result
   })
 
   app.delete('/api/admin/mcp/groups/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
-    // 能力选择与 web_search 开启行都靠外键级联删除，无需手工清理
+    // 能力选择与 web_search / web_fetch 开启行都靠外键级联删除，无需手工清理
     await getDb(event).run(`DELETE FROM mcp_groups WHERE id = ?`, id)
     return { ok: true }
   })
 
   // ---------- MCP 日志与缓存 ----------
 
-  // MCP 调用日志：分页 + 过滤（server_name LIKE / method），ts 倒序
+  // MCP 调用日志：分页 + 过滤（server_name LIKE / method），ts 倒序；不含正文（gzip BLOB 只在详情解压）
   app.get('/api/admin/mcp/logs', async (event) => {
     requireAdmin(event)
     const db = getDb(event)
@@ -541,12 +567,30 @@ export function registerMcp(app: H3): void {
 
     const totalRow = await mustGet<{ total: number }>(db, `SELECT count(*) AS total FROM mcp_logs${whereSql}`, ...params)
     const rows = await db.all<McpLogRow>(
-      `SELECT * FROM mcp_logs${whereSql} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT id, ts, direction, group_name, server_name, method, tool_name, duration_ms, ok, error
+       FROM mcp_logs${whereSql} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
       ...params,
       limit,
       offset,
     )
     const result: Paged<McpLogRow> = { rows, total: totalRow.total }
+    return result
+  })
+
+  // 单条 MCP 日志详情（含解压后的 request_body/response_body）
+  app.get('/api/admin/mcp/logs/:id', async (event) => {
+    requireAdmin(event)
+    const id = routeId(event)
+    const row = await getDb(event).get<McpLogRow & { request_body: unknown; response_body: unknown }>(
+      `SELECT * FROM mcp_logs WHERE id = ?`,
+      id,
+    )
+    if (!row) throw new HTTPError({ status: 404, message: 'log not found' })
+    const [requestBody, responseBody] = await Promise.all([
+      unpackLogBody(row.request_body),
+      unpackLogBody(row.response_body),
+    ])
+    const result: McpLogDetail = { ...row, request_body: requestBody, response_body: responseBody }
     return result
   })
 

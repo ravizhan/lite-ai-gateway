@@ -1,6 +1,7 @@
 import { getRequestIP, type H3Event } from 'h3'
 import { getDb } from '../db/index.ts'
 import { gatewayError } from '../../shared/api.ts'
+import { packLogBody } from '../lib/log-body.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { upstreamTimeout } from '../lib/timeout.ts'
 import { tryAcquireConcurrency, type ConcurrencyPermit } from './concurrency.ts'
@@ -53,7 +54,7 @@ interface LogEntry {
   tps?: number | null
   error?: string | null
   clientIp: string | null
-  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL */
+  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL。落库前经 packLogBody 编码 */
   reqBody?: string | null
   respBody?: string | null
 }
@@ -68,6 +69,7 @@ interface LogEntry {
  */
 async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
   const usage = row.usage ?? { prompt: 0, completion: 0, cached: 0, total: 0 }
+  const [reqBody, respBody] = await Promise.all([packLogBody(row.reqBody), packLogBody(row.respBody)])
   await getDb(event).run(
     `WITH u AS (
        SELECT ? AS prompt, ? AS completion, ? AS cached, ? AS total,
@@ -105,8 +107,8 @@ async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
     row.tps ?? null,
     row.error ?? null,
     row.clientIp,
-    row.reqBody ?? null,
-    row.respBody ?? null,
+    reqBody,
+    respBody,
   )
 }
 

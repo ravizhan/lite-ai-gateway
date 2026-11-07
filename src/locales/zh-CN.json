@@ -370,6 +370,8 @@
     "webSearch": "内置 web 搜索",
     "webSearchHelp": "使用全局上游池：每次调用随机选择一个已启用的上游。同名的普通上游 web_search 会自动加上服务器前缀。启用后请刷新客户端工具列表。",
     "webSearchEndpoint": "搜索入口",
+    "webFetch": "内置 web 抓取",
+    "webFetchHelp": "由网关直接发起 GET 请求，可传 url、headers、cookies。同名的普通上游 web_fetch 会自动加上服务器前缀。启用后请刷新客户端工具列表。",
     "noCapabilities": "尚未发现任何能力。请先启用或重新加载服务器。",
     "saveGroup": "保存分组",
     "noSelected": "未选择分组",

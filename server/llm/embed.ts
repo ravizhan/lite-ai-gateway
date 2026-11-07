@@ -1,5 +1,6 @@
 import { getRequestIP, type H3Event } from 'h3'
 import { getDb } from '../db/index.ts'
+import { packLogBody } from '../lib/log-body.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { upstreamTimeout } from '../lib/timeout.ts'
 import { evalTransform } from '../lib/transform.ts'
@@ -29,13 +30,14 @@ interface EmbeddingLogEntry {
   usage?: NormalizedUsage
   error?: string | null
   clientIp: string | null
-  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL */
+  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL。落库前经 packLogBody 编码 */
   reqBody?: string | null
   respBody?: string | null
 }
 
 async function insertLog(event: H3Event, row: EmbeddingLogEntry): Promise<void> {
   const usage = row.usage ?? { prompt: 0, completion: 0, cached: 0, total: 0 }
+  const [reqBody, respBody] = await Promise.all([packLogBody(row.reqBody), packLogBody(row.respBody)])
   await getDb(event).run(
     `INSERT INTO llm_logs (
        api_key_id, protocol, model, provider_id, provider_name, stream, status,
@@ -57,8 +59,8 @@ async function insertLog(event: H3Event, row: EmbeddingLogEntry): Promise<void> 
     0,
     row.error ?? null,
     row.clientIp,
-    row.reqBody ?? null,
-    row.respBody ?? null,
+    reqBody,
+    respBody,
   )
 }
 

@@ -18,10 +18,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import type { McpServerRow } from '../../shared/api.ts'
 import { assignExposedToolNames, type ExposedNameEntry } from '../../shared/mcp-naming.ts'
+import { WEB_FETCH_TOOL, WEB_FETCH_TOOL_NAME } from '../../shared/mcp-fetch.ts'
 import { WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_NAME } from '../../shared/mcp-search.ts'
 import type { Db } from '../db/types.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 import { VERSION } from '../lib/version.ts'
+import { isWebFetchVisible, runWebFetch } from './fetch.ts'
 import { logMcp } from './logs.ts'
 import { isWebSearchVisible, runWebSearch } from './search.ts'
 import type { McpRouteInfo } from './transport-log.ts'
@@ -82,6 +84,16 @@ interface ExposedTool {
 }
 
 /** 组暴露工具表 + 枚举失败的 server（失败时无法判定“确实不存在该工具”） */
+/** 本组开启的内置工具（固定名，占用暴露名空间） */
+interface BuiltinVisibility {
+  webSearch: boolean
+  webFetch: boolean
+}
+
+function reservedBuiltinNames(builtins: BuiltinVisibility): string[] {
+  return [...(builtins.webSearch ? [WEB_SEARCH_TOOL_NAME] : []), ...(builtins.webFetch ? [WEB_FETCH_TOOL_NAME] : [])]
+}
+
 interface ExposedTools {
   table: Map<string, ExposedTool>
   /** 枚举失败的 server 及原因：tools/list 据此记 upstream 日志，tools/call 据此判定枚举不完整 */
@@ -121,7 +133,7 @@ export function createHubServer(opts: HubOptions): Server {
    * 会拖垮整组）：initialize 未宣告 tools 能力时直接不请求（SDK 会在发出请求前抛错），
    * 宣告了但 tools/list 回 MethodNotFound（-32601）同样视为空（与能力发现同一协议约定）。
    */
-  async function loadExposedTools(webSearchVisible: boolean): Promise<ExposedTools> {
+  async function loadExposedTools(builtins: BuiltinVisibility): Promise<ExposedTools> {
     const results = await Promise.allSettled(
       servers.map(async (s) => {
         const client = await getUpstreamClient(s, opts.isNode)
@@ -155,7 +167,7 @@ export function createHubServer(opts: HubOptions): Server {
         })
       }
     }
-    const names = assignExposedToolNames(entries, webSearchVisible ? [WEB_SEARCH_TOOL_NAME] : [])
+    const names = assignExposedToolNames(entries, reservedBuiltinNames(builtins))
     const table = new Map<string, ExposedTool>()
     entries.forEach((entry, i) => {
       table.set(names[i], { server: entry.server, rawName: entry.rawName, tool: { ...entry.tool, name: names[i] } })
@@ -248,6 +260,14 @@ export function createHubServer(opts: HubOptions): Server {
     })
   }
 
+  async function loadBuiltins(): Promise<BuiltinVisibility> {
+    const [webSearch, webFetch] = await Promise.all([
+      isWebSearchVisible(db, opts.groupName),
+      isWebFetchVisible(db, opts.groupName),
+    ])
+    return { webSearch, webFetch }
+  }
+
   const server = new Server(
     { name: 'lite-ai-gateway', version: VERSION },
     { capabilities: { tools: {}, prompts: {}, resources: {} } },
@@ -260,10 +280,10 @@ export function createHubServer(opts: HubOptions): Server {
   server.setRequestHandler(
     ListToolsRequestSchema,
     guard(async () => {
-      const webSearchVisible = await isWebSearchVisible(db, opts.groupName)
+      const builtins = await loadBuiltins()
       const overrides = await loadOverrides()
       const startedAt = Date.now()
-      const { table, failures } = await loadExposedTools(webSearchVisible)
+      const { table, failures } = await loadExposedTools(builtins)
       for (const failure of failures) await logUpstreamFailure(failure.server.name, 'tools/list', failure.error, startedAt)
       if (failures.length > 0) {
         throw new McpError(
@@ -273,7 +293,8 @@ export function createHubServer(opts: HubOptions): Server {
       }
       return {
         tools: [
-          ...(webSearchVisible ? [WEB_SEARCH_TOOL] : []),
+          ...(builtins.webSearch ? [WEB_SEARCH_TOOL] : []),
+          ...(builtins.webFetch ? [WEB_FETCH_TOOL] : []),
           ...[...table.values()].map(({ server, rawName, tool }) => ({
             ...tool,
             description: `[${server.name}] ${overrides.get(`${server.id}:tool:${rawName}`) ?? tool.description ?? ''}`,
@@ -292,8 +313,8 @@ export function createHubServer(opts: HubOptions): Server {
     CallToolRequestSchema,
     guard(async (request: CallToolRequest, extra: { requestId: RequestId; signal: AbortSignal }) => {
       const fullName = request.params?.name ?? ''
-      const webSearchVisible = await isWebSearchVisible(db, opts.groupName)
-      if (fullName === WEB_SEARCH_TOOL_NAME && webSearchVisible) {
+      const builtins = await loadBuiltins()
+      if (fullName === WEB_SEARCH_TOOL_NAME && builtins.webSearch) {
         return runWebSearch({
           db,
           isNode: opts.isNode,
@@ -302,8 +323,13 @@ export function createHubServer(opts: HubOptions): Server {
           onSelected: (serverName) => opts.onRoute?.({ id: extra.requestId, server_name: serverName }),
         })
       }
+      if (fullName === WEB_FETCH_TOOL_NAME && builtins.webFetch) {
+        // 本地执行，无上游 server
+        opts.onRoute?.({ id: extra.requestId, server_name: null })
+        return runWebFetch({ isNode: opts.isNode, args: request.params?.arguments, signal: extra.signal })
+      }
       const startedAt = Date.now()
-      const { table, failures } = await loadExposedTools(webSearchVisible)
+      const { table, failures } = await loadExposedTools(builtins)
       // 解析用的上游 tools/list 失败同样留痕（否则这条客户端请求只能看到“无法解析”）
       for (const failure of failures) await logUpstreamFailure(failure.server.name, 'tools/list', failure.error, startedAt)
       if (failures.length > 0) {

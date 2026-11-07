@@ -8,8 +8,11 @@
 --   ALTER TABLE llm_logs ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 0;
 -- 之后执行本文件创建回填触发器。存量行默认 cost_pending = 0，视为已冻结、永不重算。
 -- 缺 MCP 日志正文列的存量库另需：
---   ALTER TABLE mcp_logs ADD COLUMN request_body TEXT;
---   ALTER TABLE mcp_logs ADD COLUMN response_body TEXT;
+--   ALTER TABLE mcp_logs ADD COLUMN request_body BLOB;
+--   ALTER TABLE mcp_logs ADD COLUMN response_body BLOB;
+-- 日志正文列（llm_logs.req_body/resp_body、mcp_logs.request_body/response_body）存 gzip BLOB
+-- （base64 data URI 先换成占位符，见 server/lib/log-body.ts）；存量库列声明为 TEXT 也照常
+-- 写入 BLOB，旧的未压缩 TEXT 行读取时原样返回，无需迁移。
 
 CREATE TABLE IF NOT EXISTS providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,8 +113,8 @@ CREATE TABLE IF NOT EXISTS llm_logs (
   cost_pending INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   client_ip TEXT,
-  req_body TEXT, -- 仅错误请求（最终状态非 200）记录完整请求体；正常请求为 NULL
-  resp_body TEXT -- 仅错误请求记录完整响应体（流式为拼接后的全部 chunk）；正常请求为 NULL
+  req_body BLOB, -- 仅错误请求（最终状态非 200）记录完整请求体（gzip）；正常请求为 NULL
+  resp_body BLOB -- 仅错误请求记录完整响应体（gzip；流式为拼接后的全部 chunk）；正常请求为 NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_logs_ts ON llm_logs(ts);
@@ -211,6 +214,11 @@ CREATE TABLE IF NOT EXISTS mcp_group_web_search (
   group_id INTEGER PRIMARY KEY REFERENCES mcp_groups(id) ON DELETE CASCADE
 );
 
+-- 分组本地 web_fetch 开关：有行 = 开启，无行 = 关闭（网关直接发起 GET，不经上游 MCP）。
+CREATE TABLE IF NOT EXISTS mcp_group_web_fetch (
+  group_id INTEGER PRIMARY KEY REFERENCES mcp_groups(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS mcp_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL DEFAULT (datetime('now')),
@@ -222,8 +230,8 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
   duration_ms INTEGER NOT NULL,
   ok INTEGER NOT NULL,
   error TEXT,
-  request_body TEXT, -- 入站 JSON-RPC 消息原文（请求/通知；协议层前被拒的请求为原始 HTTP 请求体）；内部上游行为合成请求
-  response_body TEXT -- 发给客户端的完整 JSON-RPC 响应原文（成功与失败均记录）；通知或无响应为 NULL
+  request_body BLOB, -- 入站 JSON-RPC 消息原文（gzip；请求/通知；协议层前被拒的请求为原始 HTTP 请求体）；内部上游行为合成请求
+  response_body BLOB -- 发给客户端的完整 JSON-RPC 响应原文（gzip；成功与失败均记录）；通知或无响应为 NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_logs_ts ON mcp_logs(ts);

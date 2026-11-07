@@ -1,4 +1,5 @@
 import type { Db } from '../db/types.ts'
+import { packLogBody } from '../lib/log-body.ts'
 import { sanitizeError } from '../lib/sanitize.ts'
 
 /** 日志来源：'call' = 客户端协议请求（含通知）；'upstream' = hub 聚合时的内部上游调用 */
@@ -24,11 +25,16 @@ interface McpLogEntry {
 
 /**
  * 写一条 mcp_logs（单条 INSERT，D1 子请求预算内）。
- * - error 必过 sanitizeError 掩码；request_body / response_body 按原文落库（截断会毁掉协议原文）。
+ * - error 必过 sanitizeError 掩码；request_body / response_body 不截断，经 packLogBody
+ *   （base64 data URI 换占位符 + gzip）落库为 BLOB。
  * - 落库失败只记 console.error，绝不把异常抛回协议路径（日志失败不能变成客户端可见的 500）。
  */
 export async function logMcp(db: Db, entry: McpLogEntry): Promise<void> {
   try {
+    const [requestBody, responseBody] = await Promise.all([
+      packLogBody(entry.request_body),
+      packLogBody(entry.response_body),
+    ])
     await db.run(
       `INSERT INTO mcp_logs (
          direction, group_name, server_name, method, tool_name, duration_ms, ok, error, request_body, response_body
@@ -41,8 +47,8 @@ export async function logMcp(db: Db, entry: McpLogEntry): Promise<void> {
       entry.duration_ms,
       entry.ok ? 1 : 0,
       entry.error ? sanitizeError(entry.error) : null,
-      entry.request_body ?? null,
-      entry.response_body ?? null,
+      requestBody,
+      responseBody,
     )
   } catch (error) {
     console.error('[mcp-log] insert failed:', sanitizeError(String((error as Error)?.message ?? error)))

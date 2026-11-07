@@ -74,6 +74,10 @@ export interface LlmLogRow {
   cost_pending: number
   error: string | null
   client_ip: string | null
+}
+
+/** GET /api/admin/logs/:id：列表行 + 解压后的正文（仅错误请求有值） */
+export interface LlmLogDetail extends LlmLogRow {
   req_body: string | null
   resp_body: string | null
 }
@@ -129,6 +133,8 @@ export interface McpGroupWithCapabilities extends McpGroupRow {
   capabilities: McpGroupCapabilitySelection[]
   /** mcp_group_web_search 有行 = 1（暴露内置 web_search）；0 = 不暴露 */
   web_search: 0 | 1
+  /** mcp_group_web_fetch 有行 = 1（暴露内置 web_fetch）；0 = 不暴露 */
+  web_fetch: 0 | 1
 }
 
 export interface McpLogRow {
@@ -142,6 +148,10 @@ export interface McpLogRow {
   duration_ms: number
   ok: number
   error: string | null
+}
+
+/** GET /api/admin/mcp/logs/:id：列表行 + 解压后的正文 */
+export interface McpLogDetail extends McpLogRow {
   /** 入站 JSON-RPC 消息原文（请求/通知）；协议层前被拒的请求为原始 HTTP 请求体 */
   request_body: string | null
   /** 发给客户端的完整 JSON-RPC 响应原文（成功与失败均记录）；通知或无响应时为 null */

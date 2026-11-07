@@ -2,8 +2,14 @@ import type { H3 } from 'h3'
 import { HTTPError, getQuery } from 'h3'
 import { requireAdmin } from '../auth.ts'
 import { getDb } from '../db/index.ts'
+import { unpackLogBody } from '../lib/log-body.ts'
 import { mustGet, normalizeTs, pagingParams, routeId } from './common.ts'
-import type { LlmLogRow, Paged } from '../../shared/api.ts'
+import type { LlmLogDetail, LlmLogRow, Paged } from '../../shared/api.ts'
+
+/** 列表列：不含 req_body/resp_body（gzip BLOB，只在详情解压返回） */
+const LIST_COLUMNS = `id, ts, api_key_id, protocol, model, provider_id, provider_name, stream, status,
+  prompt_tokens, completion_tokens, cached_tokens, total_tokens, ttft_ms, duration_ms, tps,
+  cost, cost_pending, error, client_ip`
 
 export function registerLogs(app: H3): void {
   // 请求日志：分页 + 过滤，ts 倒序
@@ -51,7 +57,7 @@ export function registerLogs(app: H3): void {
       ...params,
     )
     const rows = await db.all<LlmLogRow>(
-      `SELECT * FROM llm_logs${whereSql} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT ${LIST_COLUMNS} FROM llm_logs${whereSql} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
       ...params,
       limit,
       offset,
@@ -64,8 +70,13 @@ export function registerLogs(app: H3): void {
   app.get('/api/admin/logs/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
-    const row = await getDb(event).get<LlmLogRow>(`SELECT * FROM llm_logs WHERE id = ?`, id)
+    const row = await getDb(event).get<LlmLogRow & { req_body: unknown; resp_body: unknown }>(
+      `SELECT * FROM llm_logs WHERE id = ?`,
+      id,
+    )
     if (!row) throw new HTTPError({ status: 404, message: 'log not found' })
-    return row
+    const [reqBody, respBody] = await Promise.all([unpackLogBody(row.req_body), unpackLogBody(row.resp_body)])
+    const result: LlmLogDetail = { ...row, req_body: reqBody, resp_body: respBody }
+    return result
   })
 }

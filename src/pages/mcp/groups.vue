@@ -33,7 +33,7 @@ const showDelete = computed({
   },
 })
 
-const form = reactive({ name: '', description: '', selected: new Set<string>(), webSearch: false })
+const form = reactive({ name: '', description: '', selected: new Set<string>(), webSearch: false, webFetch: false })
 const nameError = ref('')
 const expandedServers = ref<number[]>([])
 
@@ -52,16 +52,17 @@ function keyOf(serverId: number, kind: McpCapabilityKind, name: string) {
 watch(selected, (g) => {
   form.selected = new Set(g ? g.capabilities.map((c) => keyOf(c.server_id, c.kind, c.name)) : [])
   form.webSearch = g?.web_search === 1
+  form.webFetch = g?.web_fetch === 1
   form.name = g?.name ?? ''
   form.description = g?.description ?? ''
   nameError.value = ''
 })
 
 function groupCount(g: McpGroupWithCapabilities) {
-  return g.capabilities.length + (g.web_search === 1 ? 1 : 0)
+  return g.capabilities.length + (g.web_search === 1 ? 1 : 0) + (g.web_fetch === 1 ? 1 : 0)
 }
 
-const selectedCount = computed(() => form.selected.size + (form.webSearch ? 1 : 0))
+const selectedCount = computed(() => form.selected.size + (form.webSearch ? 1 : 0) + (form.webFetch ? 1 : 0))
 
 const groupEndpoint = computed(() =>
   selected.value ? `${window.location.origin}/mcp/${encodeURIComponent(selected.value.name)}` : '',
@@ -70,6 +71,7 @@ const groupEndpoint = computed(() =>
 function clearAll() {
   form.selected = new Set()
   form.webSearch = false
+  form.webFetch = false
 }
 
 function capsOf(server: McpServerCapabilities, kind: McpCapabilityKind) {
@@ -186,7 +188,7 @@ async function saveGroup() {
     })
     await api(`/api/admin/mcp/groups/${selected.value.id}`, {
       method: 'PUT',
-      body: { name: form.name.trim(), description: form.description, capabilities, web_search: form.webSearch ? 1 : 0 },
+      body: { name: form.name.trim(), description: form.description, capabilities, web_search: form.webSearch ? 1 : 0, web_fetch: form.webFetch ? 1 : 0 },
     })
     toast.add({ title: t('mcpGroups.saved'), color: 'success' })
     await loadAll()
@@ -268,6 +270,13 @@ async function saveGroup() {
               v-model="form.webSearch"
               :label="t('mcpGroups.webSearch')"
               :description="t('mcpGroups.webSearchHelp')"
+              class="rounded-md border border-(--ui-border) px-3 py-2.5"
+            />
+
+            <UCheckbox
+              v-model="form.webFetch"
+              :label="t('mcpGroups.webFetch')"
+              :description="t('mcpGroups.webFetchHelp')"
               class="rounded-md border border-(--ui-border) px-3 py-2.5"
             />
 

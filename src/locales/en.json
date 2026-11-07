@@ -370,6 +370,8 @@
     "webSearch": "Built-in web search",
     "webSearchHelp": "Uses the shared upstream pool: each call picks one enabled upstream at random. Ordinary upstream tools named web_search get a server prefix. Refresh the client tool list after enabling.",
     "webSearchEndpoint": "Search endpoint",
+    "webFetch": "Built-in web fetch",
+    "webFetchHelp": "The gateway sends the GET request itself; accepts url, headers and cookies. Ordinary upstream tools named web_fetch get a server prefix. Refresh the client tool list after enabling.",
     "noCapabilities": "No capabilities discovered yet. Enable or reload a server first.",
     "saveGroup": "Save group",
     "noSelected": "No group selected",

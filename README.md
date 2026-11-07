@@ -26,6 +26,8 @@ pnpm start             # 托管 dist/ + API，默认 8788
 
 空库首次启动会自动执行 `schema.sql`，数据库默认落在 `./data/gateway.db`。打开 http://localhost:8788，用 `ADMIN_TOKEN` 登录后台。
 
+Node 启动时把数据库切换为 `auto_vacuum = INCREMENTAL`，之后每小时执行一次 `PRAGMA incremental_vacuum`，把删除数据后空出的页归还给文件系统。已有数据库在首次启动时会自动执行一次 `VACUUM` 完成切换，耗时与库大小成正比，期间需要约一倍库大小的临时磁盘空间。
+
 ### Docker 自部署
 
 构建阶段用 Node 26 和 pnpm 编译前端，再用 `pnpm build:server --no-exe` 把后端及依赖打成单个 `node.mjs`，不生成 SEA。运行阶段基于 `gcr.io/distroless/nodejs26-debian13:nonroot`，只复制 `server/node.mjs`、同目录的 `schema.sql` 和 `dist/`，不含后端源码和 `node_modules`。
@@ -223,6 +225,10 @@ chat 和 responses（含流式）用实际响应那家供应商的价格，故�
 
 流式响应被客户端取消或上游中断后，网关结束收尾、释放并发租约并写入日志，不切换供应商。SSE 断流记录 `error = 'upstream stream interrupted'`，用量和成本记为 0；同时丢失租约时优先记录租约错误。`status` 保留上游已返回的 HTTP 状态，可能仍是 200，需结合 `error` 判断请求是否完整结束。4xx 响应在捕获过程中中断时保留请求正文和上游错误状态，`resp_body` 为 NULL，不把部分响应记成完整正文。
 
+#### 日志正文存储
+
+`llm_logs` 的 `req_body`/`resp_body` 和 `mcp_logs` 的 `request_body`/`response_body` 落库前先把 base64 data URI 的数据部分替换成 `[omitted N chars]` 占位符（保留 MIME 类型和原长度），再 gzip 压缩成 BLOB。日志列表接口不返回正文，正文只在 `GET /api/admin/logs/:id` 和 `GET /api/admin/mcp/logs/:id` 详情里解压返回。图片等内联二进制因此无法从日志还原。升级前写入的未压缩 TEXT 正文照常可读，无需迁移。
+
 #### 超时与并发
 
 `timeout_ms` 只对非流式 chat/responses、embedding 和模型发现/测试生效。流式 chat/responses 不套上游超时，卡住的长流不会被中止，也不会因此切换供应商。
@@ -249,9 +255,9 @@ MCP 端点与 LLM 共用 `api_keys` 认证，没有独立的 MCP key。上游 se
 
 工具默认用原始名称，只有同一组内实际暴露的名称冲突时，才给冲突双方加 `${serverName}__` 前缀：两台服务器都有 `search` 时暴露为 `alpha__search` 和 `beta__search`，组内只选一台则仍是 `search`。原生名和生成的前缀名再冲突时继续叠加前缀。prompts 始终带 `${serverName}__${name}` 前缀，resources 不带前缀，按第一个提供该 URI 的 server 路由。
 
-`tools/list` 和 `tools/call` 共用这套映射，支持分页和未经 list 的直接调用，无冲突工具不保留旧的前缀别名。组内工具发现失败时两者都返回错误，不按残缺列表重新分配名称，避免误调另一台服务器的工具；不提供 tools 能力的服务器不算发现失败。已开启的本地 `web_search` 可直接调用，不依赖普通工具库存。
+`tools/list` 和 `tools/call` 共用这套映射，支持分页和未经 list 的直接调用，无冲突工具不保留旧的前缀别名。组内工具发现失败时两者都返回错误，不按残缺列表重新分配名称，避免误调另一台服务器的工具；不提供 tools 能力的服务器不算发现失败。已开启的本地 `web_search`、`web_fetch` 可直接调用，不依赖普通工具库存。
 
-分组只暴露勾选过的白名单；空上游白名单不暴露普通能力，但可以单独开启本地 `web_search`。default 组不过滤普通上游，也不会自动加入搜索工具。server 创建或启用时自动发现能力并持久化快照，供分组选择界面使用；`POST /api/admin/mcp/reload` 清空上游连接缓存。
+分组只暴露勾选过的白名单；空上游白名单不暴露普通能力，但可以单独开启本地 `web_search`、`web_fetch`。default 组不过滤普通上游，也不会自动加入这两个内置工具。server 创建或启用时自动发现能力并持久化快照，供分组选择界面使用；`POST /api/admin/mcp/reload` 清空上游连接缓存。
 
 #### 内置 `web_search`
 
@@ -263,9 +269,25 @@ MCP 端点与 LLM 共用 `api_keys` 认证，没有独立的 MCP key。上游 se
 
 统一输入为 `query`、`max_results`（1–20 的整数，默认 10）和可选 `objective`，`query` 去除首尾空白后须为 1–400 字符；输出为 `{ results: [...] }`，每项含 HTTP(S) `url`、可空 `content` 与可选 `title`、`published_at`。转换脚本为 `({ request }) => upstreamArguments` 与 `({ request, response }) => ({ results })`，只能转换数据，不能选服务器、工具或请求头，也不能访问网络、宿主函数和数据库；上游 `isError` 直接作为工具错误返回。
 
+#### 内置 `web_fetch`
+
+在「分组」勾选「内置 web 抓取」后，该组以固定名称 `web_fetch` 暴露一个由网关进程直接发起的 HTTP GET（Node 用 `node:http`/`node:https`，Workers 用 Worker `fetch`），不经过任何上游 MCP；同名普通工具按服务器前缀规则改名。
+
+输入为 `url`（必填，HTTP(S) 绝对地址）、`headers`（可选，名称到值的对象，原样作为请求头）和 `cookies`（可选，名称到值的对象，拼成一个 `Cookie` 头，追加在 `headers` 里已有的 Cookie 之后）。最多跟随 20 次重定向，跨源跳转时去掉 `Cookie`、`Authorization` 和 `Proxy-Authorization`；建连和读取响应体共用 60 秒截止。结果是单个 text 块里的 JSON：最终 `url`、`status`、`status_text`、`headers`（不含 Set-Cookie）、`set_cookies`、`content_type`、文本响应的 `body` 或二进制响应的 `body_base64`、`bytes` 和 `truncated`；响应体最多读取 1 MiB。HTTP 非 2xx 照常返回状态码，网络错误、超时和取消返回 `isError: true`。
+
+只允许访问公网。初始 URL 和每一跳重定向目标都先检查主机：`localhost`、`*.localhost` 和非公网 IP 字面量（环回、私网、链路本地含 `169.254.169.254`、CGNAT、文档与保留段、IPv6 的 ULA/链路本地/组播，以及内嵌这些 IPv4 的映射地址）直接拒绝。Node 上还会在连接层检查 DNS 解析结果，任一结果不是公网地址就拒绝，被检查的地址就是实际连接的地址，所以指向内网的域名和 DNS 重绑定都绕不过去；每次请求新建连接，不走 HTTP 代理。Workers 的域名在 Cloudflare 边缘解析，出站本来就到不了网关所在内网，只做主机静态检查。被拒绝时返回 `isError`，文本为 `web_fetch blocked non-public address: ...`。
+
+已有数据库需要手动建表：
+
+```sql
+CREATE TABLE IF NOT EXISTS mcp_group_web_fetch (
+  group_id INTEGER PRIMARY KEY REFERENCES mcp_groups(id) ON DELETE CASCADE
+);
+```
+
 #### MCP 日志
 
-经过认证进入 MCP 传输层的请求都会记录，包括 initialize、ping、工具调用、提示词、资源读取、通知，以及无效请求和传输层拒绝；各类 `*/list` 能力列表请求和 `notifications/initialized` 通知不记录。`request_body` 保存请求原文，`response_body` 保存发给客户端的完整响应（成功和失败都记录），JSON-RPC error 和 `isError: true` 的工具结果记为失败。取消或断连且无响应时保留输入并记失败，`response_body` 为 NULL。每个客户端请求记一条 `direction='call'` 日志，内部上游发现失败另记一条 `direction='upstream'`。
+经过认证进入 MCP 传输层的请求都会记录，包括 initialize、ping、工具调用、提示词、资源读取、通知，以及无效请求和传输层拒绝；各类 `*/list` 能力列表请求和 `notifications/initialized` 通知不记录。`request_body` 保存请求原文，`response_body` 保存发给客户端的完整响应（成功和失败都记录），两者按「日志正文存储」的规则替换 base64 并压缩；JSON-RPC error 和 `isError: true` 的工具结果记为失败。取消或断连且无响应时保留输入并记失败，`response_body` 为 NULL。每个客户端请求记一条 `direction='call'` 日志，内部上游发现失败另记一条 `direction='upstream'`。
 
 错误摘要会脱敏，但原始请求和响应可能含敏感数据，数据库和管理端的访问权限需自行控制。
 

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../lib/api'
 import { formatLocalTs } from '../lib/time'
 import { usePagedList } from '../composables/usePagedList'
-import type { LlmLogRow, ProviderRow } from '../../shared/api'
+import type { LlmLogDetail, LlmLogRow, ProviderRow } from '../../shared/api'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -20,7 +20,7 @@ let refreshTimer: ReturnType<typeof setInterval> | undefined
 
 // ---------- 详情弹窗 ----------
 const detailOpen = ref(false)
-const detail = ref<LlmLogRow | null>(null)
+const detail = ref<LlmLogDetail | null>(null)
 
 const protocolOptions = computed(() => [
   { label: t('logs.allProtocols'), value: null },
@@ -51,12 +51,13 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => clearInterval(refreshTimer))
 
-// 点击行 → 拉取完整详情（含 req_body/resp_body）弹窗展示
+// 点击行 → 先用列表行展示，再拉取含 req_body/resp_body 的完整详情
 async function openDetail(_e: Event, row: { id: string }) {
   detailOpen.value = true
-  detail.value = rows.value.find((r) => String(r.id) === row.id) ?? null
+  const listRow = rows.value.find((r) => String(r.id) === row.id)
+  detail.value = listRow ? { ...listRow, req_body: null, resp_body: null } : null
   try {
-    detail.value = await api<LlmLogRow>(`/api/admin/logs/${row.id}`)
+    detail.value = await api<LlmLogDetail>(`/api/admin/logs/${row.id}`)
   } catch {
     // 详情拉取失败时保留列表行数据展示
   }

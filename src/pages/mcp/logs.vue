@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { api } from '../../lib/api'
 import { usePagedList } from '../../composables/usePagedList'
 import { formatLocalTs } from '../../lib/time'
-import type { McpLogRow } from '../../../shared/api'
+import type { McpLogDetail, McpLogRow } from '../../../shared/api'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -21,8 +22,9 @@ const methodOptions = computed(() => [
 ])
 
 // ---------- 详情弹窗 ----------
-// 列表行已带完整请求体与响应体（SELECT *），点击行直接展示，无需二次请求
-const detail = ref<McpLogRow | null>(null)
+// 列表行不含正文：先用列表行展示，再拉取含 request_body/response_body 的详情
+const detail = ref<McpLogDetail | null>(null)
+const detailLoading = ref(false)
 
 const detailOpen = computed({
   get: () => detail.value !== null,
@@ -31,8 +33,19 @@ const detailOpen = computed({
   },
 })
 
-function openDetail(_e: Event, row: { original: McpLogRow }) {
-  detail.value = row.original
+async function openDetail(_e: Event, row: { original: McpLogRow }) {
+  const id = row.original.id
+  detail.value = { ...row.original, request_body: null, response_body: null }
+  detailLoading.value = true
+  try {
+    const full = await api<McpLogDetail>(`/api/admin/mcp/logs/${id}`)
+    // 拉取期间弹窗已关闭或切到其他行时丢弃结果
+    if (detail.value?.id === id) detail.value = full
+  } catch {
+    // 详情拉取失败时保留列表行数据展示
+  } finally {
+    if (detail.value?.id === id) detailLoading.value = false
+  }
 }
 
 /** 请求/响应体：能解析成 JSON 就美化缩进，否则按原文展示 */
@@ -183,7 +196,10 @@ onMounted(() => {
             >{{ formatBody(detail.request_body) }}</pre>
           </template>
         </UCollapsible>
-        <div v-else class="rounded-md border border-(--ui-border) bg-(--ui-bg-elevated) px-3 py-2 text-xs text-(--ui-text-muted)">
+        <div
+          v-else-if="!detailLoading"
+          class="rounded-md border border-(--ui-border) bg-(--ui-bg-elevated) px-3 py-2 text-xs text-(--ui-text-muted)"
+        >
           {{ t('mcpLogs.noRequestBody') }}
         </div>
 

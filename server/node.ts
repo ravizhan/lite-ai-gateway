@@ -7,7 +7,7 @@ import { serve } from 'h3/node'
 import { createApp } from './app.ts'
 import { setNodeDb } from './db/index.ts'
 import { createNodeDb } from './db/node.ts'
-import { ensureSchema } from './db/bootstrap.ts'
+import { ensureIncrementalVacuum, ensureSchema, scheduleIncrementalVacuum } from './db/bootstrap.ts'
 import { installNodeMcpBindings } from './mcp/bindings-node.ts'
 
 // 加载 .env（Node 20.6+；文件不存在则忽略）
@@ -22,12 +22,16 @@ const distDir = join(dirname(fileURLToPath(import.meta.url)), isSea() ? 'dist' :
 const dbPath = process.env.DATABASE_PATH ?? './data/gateway.db'
 const port = Number(process.env.PORT ?? 8788)
 
-// Node 端注入 node:sqlite 并建表（仅空库；非空库跳过正常启动）
+// Node 端注入 node:sqlite，切换 auto_vacuum 后建表（仅空库；非空库跳过正常启动）
 const db = createNodeDb(dbPath)
 setNodeDb(db)
+if (await ensureIncrementalVacuum(db)) {
+  console.log(`[db] enabled incremental auto_vacuum in ${dbPath}`)
+}
 if (await ensureSchema(db)) {
   console.log(`[db] initialized schema in ${dbPath}`)
 }
+scheduleIncrementalVacuum(db)
 
 // Node 端注入 MCP 传输层（stdio/SSE 上游 + Node SSE 端点），必须在 createApp 前完成：
 // registerMcp 在 createApp 内同步调用 getNodeMcpBindings()。
