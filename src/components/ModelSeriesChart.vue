@@ -12,7 +12,7 @@ use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, AxisPointerComp
 const props = defineProps<{
   /** x 轴时间戳（与 values 行对齐） */
   labels: string[]
-  /** 每模型一层堆叠面积；values 与 labels 对齐 */
+  /** 每模型一条独立曲线（不堆叠，0 值贴底）；values 与 labels 对齐 */
   series: { name: string; color: string; values: number[] }[]
   /** 固定 group 名时多实例联动（同一时间戳的轴指针/提示框同步） */
   group?: string
@@ -84,7 +84,7 @@ const chartOption = computed(() => {
     backgroundColor: 'transparent',
     color: props.series.map((series) => series.color),
     textStyle: { color: highlightedColor, fontFamily: 'inherit' },
-    grid: { left: 4, right: 12, top: 36, bottom: 4 },
+    grid: { left: 4, right: 12, top: 44, bottom: 4 },
     tooltip: {
       trigger: 'axis' as const,
       confine: true,
@@ -103,13 +103,14 @@ const chartOption = computed(() => {
       top: 0,
       right: 0,
       icon: 'roundRect',
-      itemWidth: 10,
-      itemHeight: 8,
-      itemGap: 16,
-      textStyle: { color: textColor, fontSize: 12 },
+      itemWidth: 16,
+      itemHeight: 12,
+      itemGap: 20,
+      textStyle: { color: textColor, fontSize: 14 },
       pageIconColor: highlightedColor,
+      pageIconSize: 14,
       pageIconInactiveColor: borderColor,
-      pageTextStyle: { color: textColor },
+      pageTextStyle: { color: textColor, fontSize: 13 },
     },
     xAxis: {
       type: 'category' as const,
@@ -136,7 +137,6 @@ const chartOption = computed(() => {
     series: props.series.map((series) => ({
       name: series.name,
       type: 'line' as const,
-      stack: 'total',
       data: series.values,
       smooth: 0.35,
       smoothMonotone: 'x' as const,
@@ -147,8 +147,8 @@ const chartOption = computed(() => {
       itemStyle: { color: series.color, borderColor: surfaceColor, borderWidth: 1.5 },
       areaStyle: {
         color: new graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: withAlpha(series.color, 0.45) },
-          { offset: 1, color: withAlpha(series.color, 0.08) },
+          { offset: 0, color: withAlpha(series.color, 0.25) },
+          { offset: 1, color: withAlpha(series.color, 0.02) },
         ]),
       },
       emphasis: { focus: 'series' as const },
