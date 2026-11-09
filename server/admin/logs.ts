@@ -9,7 +9,7 @@ import type { LlmLogDetail, LlmLogRow, Paged } from '../../shared/api.ts'
 /** 列表列：不含 req_body/resp_body（gzip BLOB，只在详情解压返回） */
 const LIST_COLUMNS = `id, ts, api_key_id, protocol, model, provider_id, provider_name, stream, status,
   prompt_tokens, completion_tokens, cached_tokens, total_tokens, ttft_ms, duration_ms, tps,
-  cost, cost_pending, error, client_ip`
+  cost, cost_pending, error, client_ip, cache_anomaly`
 
 export function registerLogs(app: H3): void {
   // 请求日志：分页 + 过滤，ts 倒序
@@ -41,6 +41,7 @@ export function registerLogs(app: H3): void {
       where.push('status = ?')
       params.push(status)
     }
+    if (q.cacheAnomaly === '1') where.push('cache_anomaly = 1')
     if (typeof q.from === 'string' && q.from) {
       where.push('ts >= ?')
       params.push(normalizeTs(q.from))
@@ -66,7 +67,7 @@ export function registerLogs(app: H3): void {
     return result
   })
 
-  // 单条日志详情（含 req_body/resp_body，仅错误请求有值）
+  // 单条日志详情（含 req_body/resp_body：错误请求与缓存率异常请求有值）
   app.get('/api/admin/logs/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)

@@ -222,8 +222,8 @@ function isNonEmpty(value: unknown): boolean {
   return false
 }
 
-/** 派生身份：无 user 内容 → null；否则返回根对象（不递归排序 key） */
-function deriveAffinityInput(
+/** 派生身份：无 user 内容 → null；否则返回根对象（不递归排序 key）。缓存率监控复用同一对话身份。 */
+export function deriveAffinityInput(
   protocol: 'chat' | 'responses',
   body: Record<string, unknown>,
 ): unknown[] | null {
@@ -293,7 +293,7 @@ function deriveAffinityInput(
 }
 
 /** SHA-256 → 64 字符小写 hex */
-async function hashAffinityInput(input: string): Promise<string> {
+export async function hashAffinityInput(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
 }

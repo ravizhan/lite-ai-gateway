@@ -22,6 +22,7 @@ import {
   type NormalizedUsage,
 } from './usage.ts'
 import { createSseTap } from './sse-tap.ts'
+import { detectCacheAnomaly } from './cache-watch.ts'
 import {
   MAX_DETAIL_BODY,
   cancelBody,
@@ -54,7 +55,9 @@ interface LogEntry {
   tps?: number | null
   error?: string | null
   clientIp: string | null
-  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL。落库前经 packLogBody 编码 */
+  /** 成功请求的缓存率异常标记（见 cache-watch.ts）；缺省 0 */
+  cacheAnomaly?: boolean
+  /** 错误请求与缓存率异常请求记录；其余正常请求省略 → NULL。落库前经 packLogBody 编码 */
   reqBody?: string | null
   respBody?: string | null
 }
@@ -78,7 +81,7 @@ async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
      INSERT INTO llm_logs (
        api_key_id, protocol, model, provider_id, provider_name, stream, status,
        prompt_tokens, completion_tokens, cached_tokens, total_tokens,
-       ttft_ms, duration_ms, tps, cost, cost_pending, error, client_ip, req_body, resp_body
+       ttft_ms, duration_ms, tps, cost, cost_pending, error, client_ip, cache_anomaly, req_body, resp_body
      )
      SELECT ?, ?, u.model, u.provider_id, ?, ?, ?,
             u.prompt, u.completion, u.cached, u.total,
@@ -88,7 +91,7 @@ async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
                        + u.cached * p.cache_read_price
                        + u.completion * p.output_price) / 1000000.0 END,
             CASE WHEN p.model IS NULL THEN 1 ELSE 0 END,
-            ?, ?, ?, ?
+            ?, ?, ?, ?, ?
      FROM u
      LEFT JOIN prices p ON p.model = u.model AND p.provider_id = u.provider_id`,
     usage.prompt,
@@ -107,6 +110,7 @@ async function insertLog(event: H3Event, row: LogEntry): Promise<void> {
     row.tps ?? null,
     row.error ?? null,
     row.clientIp,
+    row.cacheAnomaly ? 1 : 0,
     reqBody,
     respBody,
   )
@@ -207,6 +211,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
     stream: (stream ? 1 : 0) as 0 | 1,
     clientIp,
   }
+  const cacheScope = { apiKeyId, protocol: opts.protocol, model, body }
   const providerById = new Map(candidates.map((provider) => [provider.id, provider]))
   const triedProviderIds = new Set<number>()
   let attemptedUpstream = false
@@ -526,16 +531,21 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
       const headers = new Headers(res.headers)
       headers.delete('content-length')
       event.waitUntil(
-        insertLog(event, {
-          ...base,
-          providerId: provider.id,
-          providerName: provider.name,
-          status: res.status,
-          usage,
-          ttftMs,
-          durationMs,
-          tps,
-        }),
+        (async () => {
+          const cacheAnomaly = await detectCacheAnomaly(db, cacheScope, usage)
+          await insertLog(event, {
+            ...base,
+            providerId: provider.id,
+            providerName: provider.name,
+            status: res.status,
+            usage,
+            ttftMs,
+            durationMs,
+            tps,
+            cacheAnomaly,
+            reqBody: cacheAnomaly ? clientReqBody : null,
+          })
+        })(),
       )
       return new Response(buf, {
         status: res.status,
@@ -589,6 +599,8 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
         // tps 分母同样以上游起点计，保持「流结束 − 首 chunk」生成窗口语义不变
         const tps = calcTps(usage.completion, Math.round(endAt - upstreamStart), ttftMs, true)
         const finalError = permit.signal.aborted ? 'concurrency lease lost' : error
+        // 断流/租约丢失的用量记为 0，不参与缓存率判定
+        const cacheAnomaly = finalError === null && (await detectCacheAnomaly(db, cacheScope, usage))
         await insertLog(event, {
           ...base,
           providerId: provider.id,
@@ -599,6 +611,8 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
           durationMs,
           tps,
           error: finalError !== null ? sanitizeError(finalError) : null,
+          cacheAnomaly,
+          reqBody: cacheAnomaly ? clientReqBody : null,
         })
       })(),
     )

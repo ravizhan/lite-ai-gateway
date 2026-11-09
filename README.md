@@ -229,6 +229,31 @@ chat 和 responses（含流式）用实际响应那家供应商的价格，故�
 
 `llm_logs` 的 `req_body`/`resp_body` 和 `mcp_logs` 的 `request_body`/`response_body` 落库前先把 base64 data URI 的数据部分替换成 `[omitted N chars]` 占位符（保留 MIME 类型和原长度），再 gzip 压缩成 BLOB。日志列表接口不返回正文，正文只在 `GET /api/admin/logs/:id` 和 `GET /api/admin/mcp/logs/:id` 详情里解压返回。图片等内联二进制因此无法从日志还原。升级前写入的未压缩 TEXT 正文照常可读，无需迁移。
 
+#### 缓存率异常
+
+成功的 chat/responses 请求按对话跟踪缓存率（`cached / prompt`），异常时把 `cache_anomaly` 记为 1 并保存请求体，用来对比前后请求、找出导致缓存失效的改动。对话身份由 API key、协议、对外模型名和派生会话内容共同决定，派生内容与亲和性的派生身份相同，即开头的 system/developer 前缀加首条非空 user 消息，所以同一 agent 会话里的子任务各算一个对话；没有 user 消息的请求不参与判定。
+
+对话开头缓存率逐条上升的阶段视为预热，不做判定。上一条请求缓存率已达 80%、出现过缓存命中后缓存率持平或下降、或已观测 8 条请求，三者满足其一即进入稳定期。稳定期内每条请求都判定，比对话此前最高缓存率低 10 个百分点及以上（例如从 95% 降到 85%），或低于 80%，都记为异常，所以突降之后持续偏低的请求也会逐条记录。一直没有缓存命中的对话（上游不支持缓存）不判定。同一对话空闲超过 5 分钟后上游缓存通常已过期，下一条请求重新预热。流式断流或租约丢失的请求用量记为 0，不参与判定。
+
+后台「请求日志」可按「仅缓存率异常」筛选，异常行在缓存率旁带警告标记，详情里展示请求体。已有数据库需要手动加列并建状态表：
+
+```sql
+ALTER TABLE llm_logs ADD COLUMN cache_anomaly INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS llm_cache_watch (
+  api_key_id INTEGER NOT NULL,
+  protocol TEXT NOT NULL,
+  model TEXT NOT NULL,
+  conversation_hash TEXT NOT NULL,
+  requests INTEGER NOT NULL,
+  last_rate_bp INTEGER NOT NULL,
+  peak_rate_bp INTEGER NOT NULL,
+  steady INTEGER NOT NULL,
+  anomaly INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (api_key_id, protocol, model, conversation_hash)
+) WITHOUT ROWID;
+```
+
 #### 超时与并发
 
 `timeout_ms` 只对非流式 chat/responses、embedding 和模型发现/测试生效。流式 chat/responses 不套上游超时，卡住的长流不会被中止，也不会因此切换供应商。

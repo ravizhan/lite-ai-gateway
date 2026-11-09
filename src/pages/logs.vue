@@ -9,7 +9,7 @@ import { useI18n } from 'vue-i18n'
 const { t } = useI18n()
 const { rows, total, page, pageSize, loading, filters, load, search } = usePagedList<LlmLogRow>(
   '/api/admin/logs',
-  { model: '', protocol: '', providerId: '', status: '' },
+  { model: '', protocol: '', providerId: '', status: '', cacheAnomaly: '' },
 )
 
 const providers = ref<ProviderRow[]>([])
@@ -36,6 +36,10 @@ const statusOptions = computed(() => [
   { label: '429', value: '429' },
   { label: '500', value: '500' },
   { label: '502', value: '502' },
+])
+const cacheOptions = computed(() => [
+  { label: t('logs.allCache'), value: null },
+  { label: t('logs.cacheAnomalyOnly'), value: '1' },
 ])
 
 onMounted(async () => {
@@ -154,6 +158,9 @@ function formatBody(raw: string | null): string {
       <UFormField :label="t('logs.status')" class="w-full sm:w-36">
         <USelect v-model="filters.status" :items="statusOptions" class="w-full" />
       </UFormField>
+      <UFormField :label="t('logs.cacheFilter')" class="w-full sm:w-40">
+        <USelect v-model="filters.cacheAnomaly" :items="cacheOptions" class="w-full" />
+      </UFormField>
       <UButton icon="i-lucide-search" :label="t('common.search')" :loading="loading" @click="search" />
     </div>
   </UCard>
@@ -208,8 +215,11 @@ function formatBody(raw: string | null): string {
         </UTooltip>
       </template>
       <template #cache_rate-cell="{ row }">
-        <span class="tabular-nums" :class="rateColor(cacheRate(row.original))">
+        <span class="inline-flex items-center gap-1 whitespace-nowrap tabular-nums" :class="rateColor(cacheRate(row.original))">
           {{ cacheRate(row.original) }}<template v-if="cacheRate(row.original) !== '-'">%</template>
+          <UTooltip v-if="row.original.cache_anomaly === 1" :text="t('logs.cacheAnomaly')">
+            <UIcon name="i-lucide-triangle-alert" class="size-3.5 text-(--ui-warning)" />
+          </UTooltip>
         </span>
       </template>
       <template #ttft_ms-cell="{ row }">
@@ -300,6 +310,10 @@ function formatBody(raw: string | null): string {
 
         <div v-if="detail.error" class="rounded-md border border-(--ui-error)/30 bg-(--ui-error)/5 px-3 py-2 text-(--ui-text-error)">
           <span class="font-semibold">{{ t('logs.error') }}:</span> {{ detail.error }}
+        </div>
+
+        <div v-if="detail.cache_anomaly === 1" class="rounded-md border border-(--ui-warning)/30 bg-(--ui-warning)/5 px-3 py-2 text-(--ui-warning)">
+          <span class="font-semibold">{{ t('logs.cacheAnomaly') }}:</span> {{ t('logs.cacheAnomalyDetail', { rate: cacheRate(detail) }) }}
         </div>
 
         <div class="text-xs text-(--ui-text-muted)">

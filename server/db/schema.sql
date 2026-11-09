@@ -10,6 +10,9 @@
 -- 缺 MCP 日志正文列的存量库另需：
 --   ALTER TABLE mcp_logs ADD COLUMN request_body BLOB;
 --   ALTER TABLE mcp_logs ADD COLUMN response_body BLOB;
+-- 缺缓存率异常监控的存量库另需（之后执行本文件创建 llm_cache_watch）：
+-- 缺缓存率异常监控的存量库另需（llm_cache_watch 建表语句见 README「缓存率异常」）：
+--   ALTER TABLE llm_logs ADD COLUMN cache_anomaly INTEGER NOT NULL DEFAULT 0;
 -- 日志正文列（llm_logs.req_body/resp_body、mcp_logs.request_body/response_body）存 gzip BLOB
 -- （base64 data URI 先换成占位符，见 server/lib/log-body.ts）；存量库列声明为 TEXT 也照常
 -- 写入 BLOB，旧的未压缩 TEXT 行读取时原样返回，无需迁移。
@@ -113,11 +116,29 @@ CREATE TABLE IF NOT EXISTS llm_logs (
   cost_pending INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   client_ip TEXT,
-  req_body BLOB, -- 仅错误请求（最终状态非 200）记录完整请求体（gzip）；正常请求为 NULL
+  -- 1 = 成功请求的缓存率异常（相对对话峰值突降或持续偏低，见 server/llm/cache-watch.ts）
+  cache_anomaly INTEGER NOT NULL DEFAULT 0,
+  req_body BLOB, -- 错误请求与 cache_anomaly = 1 的请求记录完整请求体（gzip）；其余为 NULL
   resp_body BLOB -- 仅错误请求记录完整响应体（gzip；流式为拼接后的全部 chunk）；正常请求为 NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_logs_ts ON llm_logs(ts);
+
+-- 对话级缓存率状态（每个成功的 chat/responses 请求一次 UPSERT）。对话身份同派生亲和身份；
+-- rate 为万分比整数。过期行在新对话出现时批量删除，表内只保留最近活跃的对话。
+CREATE TABLE IF NOT EXISTS llm_cache_watch (
+  api_key_id INTEGER NOT NULL,
+  protocol TEXT NOT NULL,
+  model TEXT NOT NULL,
+  conversation_hash TEXT NOT NULL,
+  requests INTEGER NOT NULL, -- 本轮（未空闲过期）已观测的请求数
+  last_rate_bp INTEGER NOT NULL,
+  peak_rate_bp INTEGER NOT NULL,
+  steady INTEGER NOT NULL, -- 0 = 预热期（缓存率逐级上升，不判定）；1 = 稳定期
+  anomaly INTEGER NOT NULL, -- 最近一次请求的判定结果
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (api_key_id, protocol, model, conversation_hash)
+) WITHOUT ROWID;
 
 -- 首次配置价格（prices INSERT，含 upsert 的插入分支）时，回填此前因无价格而挂起的日志。
 -- 只处理 cost_pending = 1 的 chat/responses 行：已冻结的历史行（含 0 价、embedding）不动；
