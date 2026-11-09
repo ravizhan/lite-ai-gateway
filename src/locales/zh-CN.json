@@ -226,7 +226,7 @@
     "allCache": "全部请求",
     "cacheAnomalyOnly": "仅缓存率异常",
     "cacheAnomaly": "缓存率异常",
-    "cacheAnomalyDetail": "本次缓存率 {rate}%，相对该对话此前的最高缓存率下降 10 个百分点以上，或低于 80%。已记录请求体，可对比前后请求排查缓存失效原因。",
+    "cacheAnomalyDetail": "本次缓存率 {rate}%，相对该对话此前的最高缓存率下降 10 个百分点以上，或低于 80%。已记录请求体和响应体，可对比前后请求排查缓存失效原因。",
     "detailTitle": "请求详情",
     "reqBody": "请求体",
     "respBody": "响应体",

@@ -6,6 +6,7 @@
  * - responses：每个 chunk 增量喂给 responses-usage 的 SSE/JSON 状态机，只捕获顶层 type
  *   与终止事件里的 response.usage；大事件、大字符串不缓存，内存与流长无关；
  * - 记录首个 chunk 到达时刻（relay 用它减上游发起时刻得到 TTFT）；
+ * - 保留前 MAX_DETAIL_BODY 字节的 chunk 引用（不拷贝），relay 在缓存率异常或首字慢时落库响应体；
  * - 由 tap 自己持有 source.pipeTo(writable)（比 pipeThrough 更稳）：正常结束由 flush 解析；
  *   断流时 pipeTo reject，但老版本 Workers 上客户端取消可能让 pipeTo 在 flush 未执行的情况下
  *   直接 resolve，故 resolve/reject 都挂同一兜底回调，finish() 只 settle 一次。
@@ -14,6 +15,7 @@
  */
 
 import { createResponsesUsageObserver } from './responses-usage.ts'
+import { MAX_DETAIL_BODY, detailText, concatDetailChunks } from './relay-support.ts'
 
 export interface SseTapResult {
   stream: TransformStream<Uint8Array, Uint8Array>
@@ -21,6 +23,8 @@ export interface SseTapResult {
   firstChunkAt: () => number | null
   /** 流结束后返回观察到的用量；只 settle 一次 */
   finish: () => Promise<{ usageRaw: unknown | null; error: string | null }>
+  /** 已转发响应的前 MAX_DETAIL_BODY 字节解码文本 */
+  bodyText: () => string
 }
 
 const MAX_TAIL = 64 * 1024 // 尾部缓冲上限 64KB
@@ -142,6 +146,8 @@ export function createSseTap(
 ): SseTapResult {
   const sink = createUsageSink(protocol)
   let firstChunkMs: number | null = null
+  const chunks: Uint8Array[] = []
+  let captured = 0
   let settled = false
   let resolveFinish!: (r: { usageRaw: unknown | null; error: string | null }) => void
   const finished = new Promise<{ usageRaw: unknown | null; error: string | null }>((r) => {
@@ -158,6 +164,10 @@ export function createSseTap(
     transform(chunk, controller) {
       if (firstChunkMs === null) firstChunkMs = performance.now() // TTFT
       controller.enqueue(chunk) // 字节透传，零改写
+      if (captured < MAX_DETAIL_BODY) {
+        chunks.push(chunk)
+        captured += chunk.byteLength
+      }
       // 观察在 enqueue 之后：解析问题绝不阻塞或破坏转发
       sink.write(chunk)
     },
@@ -183,5 +193,6 @@ export function createSseTap(
     stream,
     firstChunkAt: () => firstChunkMs,
     finish: () => finished,
+    bodyText: () => detailText(concatDetailChunks(chunks, captured)),
   }
 }

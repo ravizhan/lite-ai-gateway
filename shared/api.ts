@@ -74,11 +74,11 @@ export interface LlmLogRow {
   cost_pending: number
   error: string | null
   client_ip: string | null
-  /** 1 = 成功请求的缓存率异常（相对对话峰值突降或持续偏低），此时 req_body 有值 */
+  /** 1 = 成功请求的缓存率异常（相对对话峰值突降或持续偏低），此时 req_body/resp_body 有值 */
   cache_anomaly: number
 }
 
-/** GET /api/admin/logs/:id：列表行 + 解压后的正文（错误请求两者有值；缓存率异常请求只有 req_body） */
+/** GET /api/admin/logs/:id：列表行 + 解压后的正文（错误请求、缓存率异常请求、TTFT > 5s 的流式请求有值） */
 export interface LlmLogDetail extends LlmLogRow {
   req_body: string | null
   resp_body: string | null

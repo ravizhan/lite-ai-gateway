@@ -28,6 +28,7 @@ import {
   cancelBody,
   concatDetailChunks,
   concurrencyStateUnavailable,
+  detailText,
   readBodyText,
   readRelayRequestBody,
   resolveRelayRoute,
@@ -57,10 +58,13 @@ interface LogEntry {
   clientIp: string | null
   /** 成功请求的缓存率异常标记（见 cache-watch.ts）；缺省 0 */
   cacheAnomaly?: boolean
-  /** 错误请求与缓存率异常请求记录；其余正常请求省略 → NULL。落库前经 packLogBody 编码 */
+  /** 错误请求、缓存率异常请求与 TTFT 超过 SLOW_TTFT_MS 的流式请求记录；其余正常请求省略 → NULL。落库前经 packLogBody 编码 */
   reqBody?: string | null
   respBody?: string | null
 }
+
+/** 首字耗时超过该值的流式请求记录请求/响应正文（非流式 TTFT 即整体耗时，不按此记录） */
+const SLOW_TTFT_MS = 5000
 
 /**
  * 写一条 llm_logs（单条 INSERT，D1 子请求预算内）。
@@ -544,6 +548,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
             tps,
             cacheAnomaly,
             reqBody: cacheAnomaly ? clientReqBody : null,
+            respBody: cacheAnomaly ? detailText(buf) : null,
           })
         })(),
       )
@@ -601,6 +606,7 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
         const finalError = permit.signal.aborted ? 'concurrency lease lost' : error
         // 断流/租约丢失的用量记为 0，不参与缓存率判定
         const cacheAnomaly = finalError === null && (await detectCacheAnomaly(db, cacheScope, usage))
+        const keepBody = cacheAnomaly || (ttftMs !== null && ttftMs > SLOW_TTFT_MS)
         await insertLog(event, {
           ...base,
           providerId: provider.id,
@@ -612,7 +618,8 @@ async function relay(event: H3Event, opts: RelayOpts): Promise<Response> {
           tps,
           error: finalError !== null ? sanitizeError(finalError) : null,
           cacheAnomaly,
-          reqBody: cacheAnomaly ? clientReqBody : null,
+          reqBody: keepBody ? clientReqBody : null,
+          respBody: keepBody ? tap.bodyText() : null,
         })
       })(),
     )

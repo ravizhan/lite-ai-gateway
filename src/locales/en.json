@@ -226,7 +226,7 @@
     "allCache": "All requests",
     "cacheAnomalyOnly": "Cache anomalies only",
     "cacheAnomaly": "Cache rate anomaly",
-    "cacheAnomalyDetail": "Cache rate {rate}% dropped 10+ points below this conversation's peak, or is below 80%. The request body was recorded so you can compare it with neighbouring requests to find what broke the cache.",
+    "cacheAnomalyDetail": "Cache rate {rate}% dropped 10+ points below this conversation's peak, or is below 80%. The request and response bodies were recorded so you can compare them with neighbouring requests to find what broke the cache.",
     "detailTitle": "Request Detail",
     "reqBody": "Request Body",
     "respBody": "Response Body",

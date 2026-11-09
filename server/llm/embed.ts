@@ -30,7 +30,7 @@ interface EmbeddingLogEntry {
   usage?: NormalizedUsage
   error?: string | null
   clientIp: string | null
-  /** 仅错误请求（最终状态非 200）记录；正常请求省略 → NULL。落库前经 packLogBody 编码 */
+  /** 仅错误请求（最终状态非 200）记录；成功请求省略 → NULL。落库前经 packLogBody 编码 */
   reqBody?: string | null
   respBody?: string | null
 }

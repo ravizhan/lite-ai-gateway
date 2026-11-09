@@ -67,7 +67,7 @@ export function registerLogs(app: H3): void {
     return result
   })
 
-  // 单条日志详情（含 req_body/resp_body：错误请求与缓存率异常请求有值）
+  // 单条日志详情（含 req_body/resp_body：错误请求、缓存率异常请求与 TTFT > 5s 的流式请求有值）
   app.get('/api/admin/logs/:id', async (event) => {
     requireAdmin(event)
     const id = routeId(event)
